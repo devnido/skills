@@ -8,7 +8,7 @@
 4. [src/base Structure](#base)
 5. [HTTP Client](#http-client)
 6. [Naming & DI Tokens](#naming)
-7. [Result Interceptor](#result-interceptor)
+7. [Domain Exception Filter](#domain-exception-filter)
 8. [Module Example](#module-example)
 
 ---
@@ -52,7 +52,7 @@ npx husky init
 1. Remove the default `src/app.controller.ts`, `src/app.service.ts`, and `src/app.module.ts` (for monolith)
 2. Create `src/base/` structure (see below)
 3. Create `src/modules/` (monolith) or `src/app/` (microservice)
-4. Register `ResultInterceptor` globally in `main.ts`
+4. Register `DomainExceptionFilter` globally in `main.ts`
 5. Register `helmet`, `compression`, and `ThrottlerGuard` globally in `main.ts`
 6. Set up Swagger in `main.ts`
 7. Set up env validation with zod in `src/base/config/env/`
@@ -366,8 +366,8 @@ src/base/
 │   │   └── rabbitmq.server.ts
 │   ├── nestjs/
 │   │   ├── custom.exception-filter.ts
-│   │   ├── logger.interceptor.ts
-│   │   └── result.interceptor.ts
+│   │   ├── domain-exception.filter.ts
+│   │   └── logger.interceptor.ts
 │   └── routes/
 │       └── app.routes.ts
 ├── constants/
@@ -378,11 +378,10 @@ src/base/
 │   └── health.module.ts
 └── lib/
     ├── domain/
-    │   ├── result.ts              ← manual Result<T> class
     │   ├── command.base.ts        ← abstract class Command
     │   ├── query.base.ts          ← abstract class Query
     │   ├── props.base.ts          ← abstract class Props
-    │   ├── domain-exception.base.ts   ← abstract class DomainException
+    │   ├── domain-exception.base.ts   ← abstract class DomainException extends Error (abstract `code`)
     │   ├── event.base.ts         ← abstract class Event + EventMetadata interface
     │   ├── output.base.ts        ← abstract class Output (use-case return base)
     │   ├── value-object.base.ts
@@ -578,12 +577,14 @@ export interface HttpResponse<T> {
 import { DomainException } from "@/base/lib/domain/domain-exception.base";
 
 export class DownstreamServiceErrorException extends DomainException {
+  readonly code = "DOWNSTREAM_SERVICE_ERROR";
+
   constructor(
     public readonly statusCode: number,
-    public readonly message: string,
-    public readonly code?: string,
+    message: string,
+    public readonly downstreamCode?: string,
   ) {
-    super();
+    super(message);
   }
 
   static fromAxiosError(error: unknown): DownstreamServiceErrorException {
@@ -816,20 +817,27 @@ export function obfuscatePrivateBodyProperties(
 
 ### DI Token Convention
 
+Flat `Symbol` tokens, one file per module at the module root (`<module>.di-tokens.ts`). A token is
+needed **only for a class injected through an interface** — i.e. a **port** bound to its adapter
+(repositories, gateways, event buses). A use case implements no interface, so it needs **no
+token**.
+
 ```typescript
 // user.di-tokens.ts
 export const USER_REPOSITORY = Symbol("UserRepository");
-export const USER_SERVICE = Symbol("UserService");
 ```
 
 ### Module Registration
+
+Bind ports (interface → adapter) by token; register use cases as **plain providers** (no token):
 
 ```typescript
 // user.module.ts
 @Module({
   providers: [
-    { provide: USER_REPOSITORY, useClass: MongoUserRepository },
-    UserCreator,
+    { provide: USER_REPOSITORY, useClass: MongoUserRepository }, // port → adapter (token)
+    UserCreator, // use case → plain provider (concrete class, no token)
+    UserFinder,
   ],
 })
 export class UserModule {}
@@ -839,17 +847,19 @@ export class UserModule {}
 
 Port functions receive domain classes as parameters (see 3 cases in SKILL.md):
 
+Ports return the value directly and **throw** a `DomainException` on the error path — there is
+no `Result` wrapper in the backend:
+
 ```typescript
 // domain/ports/user.repository.ts
-import { Result } from "@/base/lib/domain/result";
 import { CreateUserCommand } from "../props/create-user.command";
 import { FindByEmailProps } from "../props/find-by-email.props";
 
 export interface UserRepository {
   // Case 1: same params as use case → reuse Command/Query
-  save(command: CreateUserCommand): Promise<Result<User>>;
+  save(command: CreateUserCommand): Promise<User>;
   // Case 3: different params → create <FunctionName>Props
-  findByEmail(props: FindByEmailProps): Promise<Result<User>>;
+  findByEmail(props: FindByEmailProps): Promise<User>;
 }
 
 // domain/ports/event-bus.port.ts
@@ -857,37 +867,279 @@ import { UserCreatedEvent } from "../events/user-created.event";
 
 export interface EventBus {
   // Case 2: publishing an event
-  publish(event: UserCreatedEvent): Promise<Result<void>>;
+  publish(event: UserCreatedEvent): Promise<void>;
+}
+```
+
+#### Port file isolation (only the interface)
+
+A port file declares **only** the port interface(s) and nothing else. Every
+supporting type it references — argument shapes **and** return/result wrappers —
+is extracted to its own file under `domain/props/`. Never declare a helper `type`
+or `interface` inline in the port file.
+
+- **Argument shapes** — when a method's argument is **not identical** to an
+  existing use-case input, create a `<action>-<entity>.props.ts` file in
+  `domain/props/` holding an interface/class with **only the fields that method
+  needs** (not the whole command). That type is the method's argument type
+  (this is "Case 3 / `<FunctionName>Props`" above).
+- **Return/result wrappers** — a wrapper the port returns (e.g. a paginated
+  `MatchingSpots = { items: Spot[]; total: number }`) is likewise its own file in
+  `domain/props/` (e.g. `matching-spots.props.ts`).
+
+```typescript
+// ❌ Wrong — result and argument shapes declared inline in the port file
+// domain/ports/spot.repository.ts
+export interface MatchingSpots { items: Spot[]; total: number }      // ⟵ move out
+export interface CreateSpotParams { /* … */ }                        // ⟵ move out
+export interface SpotRepository {
+  matching(criteria: Criteria): Promise<MatchingSpots>;
+  create(params: CreateSpotParams): Promise<Spot>;
+}
+```
+
+```typescript
+// ✅ Right — the port file holds only the interface
+// domain/props/matching-spots.props.ts
+import { type Spot } from "../entities/spot.entity";
+export interface MatchingSpots {
+  items: Spot[];
+  total: number;
+}
+
+// domain/props/create-spot.props.ts   (only the fields the port needs)
+import { type Location } from "@/modules/shared/domain/value-objects/location";
+export interface CreateSpotProps {
+  name: string;
+  location: Location;
+  // …only what create() persists — not the whole CreateSpotCommand
+}
+
+// domain/ports/spot.repository.ts   (only the interface)
+import { type Criteria } from "@/base/lib/domain/criteria/criteria";
+import { type Spot } from "../entities/spot.entity";
+import { type MatchingSpots } from "../props/matching-spots.props";
+import { type CreateSpotProps } from "../props/create-spot.props";
+
+export interface SpotRepository {
+  matching(criteria: Criteria): Promise<MatchingSpots>;
+  findById(id: string): Promise<Spot | null>;
+  create(props: CreateSpotProps): Promise<Spot>;
 }
 ```
 
 ### Adapter (Implementation)
 
+**Rule — wrap every technical operation in `try/catch`.** Each call an adapter makes to its
+underlying technology (DB query, HTTP request, message publish, S3 call, …) is wrapped in a
+`try/catch`. In the `catch`, the adapter **logs** the error (with the stack and the operation
+name) and **throws a `DomainException` associated with that adapter** — an *infrastructure*
+exception such as `DatabaseErrorException` (DB), `DownstreamServiceErrorException` (HTTP),
+`MessagingErrorException` (RabbitMQ). The original error never leaks past the adapter; the
+global `DomainExceptionFilter` maps the thrown exception to its `httpStatus` (typically `500`).
+
+Distinguish the two kinds of throw inside an adapter:
+- **Infrastructure failure** (the operation itself threw) → caught, logged, rethrown as the
+  adapter's infra `DomainException` (`DatabaseErrorException`, …).
+- **Business invariant** derived from a *successful* result (not found, duplicate) → thrown
+  directly from the result, **not** from a `catch` (`UserNotFoundException`, `UserAlreadyExistsException`).
+
+The infra exception is a plain `DomainException` with `httpStatus = 500`:
+
+```typescript
+// base/lib/domain/exceptions/database-error.exception.ts
+import { HttpStatus } from "@nestjs/common";
+import { DomainException } from "@/base/lib/domain/domain-exception.base";
+
+export class DatabaseErrorException extends DomainException {
+  override readonly httpStatus = HttpStatus.INTERNAL_SERVER_ERROR; // 500
+
+  constructor(message = "A database error occurred") {
+    super(message);
+  }
+}
+```
+
 ```typescript
 // infrastructure/driven/persistence/mongo-user.repository.ts
-import { Result } from "@/base/lib/domain/result";
+import { Inject, Injectable } from "@nestjs/common";
+import { InjectModel } from "@nestjs/mongoose";
+import { type Model } from "mongoose";
+import { type LoggerPort } from "@/base/lib/domain/logger.port";
+import { LOGGER_ADAPTER } from "@/base/config/logger/logger.di-tokens";
+import { DatabaseErrorException } from "@/base/lib/domain/exceptions/database-error.exception";
 import { CreateUserCommand } from "../../domain/props/create-user.command";
 import { FindByEmailProps } from "../../domain/props/find-by-email.props";
 
 @Injectable()
 export class MongoUserRepository implements UserRepository {
-  async save(command: CreateUserCommand): Promise<Result<User>> {
-    // receives the same Command the use case received
-    const existing = await this.model.findOne({ email: command.email });
-    if (existing)
-      return Result.err(new UserAlreadyExistsException(command.email));
-    const doc = await this.model.create(command);
-    return Result.ok(UserMapper.toDomain(doc));
+  constructor(
+    @InjectModel(UserDocument.name) private readonly model: Model<UserDocument>,
+    @Inject(LOGGER_ADAPTER) private readonly logger: LoggerPort,
+  ) {
+    this.logger.setContext(MongoUserRepository.name);
   }
 
-  async findByEmail(props: FindByEmailProps): Promise<Result<User>> {
-    // receives a specific Props class
-    const doc = await this.model.findOne({ email: props.email });
-    if (!doc) return Result.err(new UserNotFoundException(props.email));
-    return Result.ok(UserMapper.toDomain(doc));
+  async save(command: CreateUserCommand): Promise<User> {
+    let existing: UserLean | null;
+    try {
+      existing = await this.model.findOne({ email: command.email }).lean<UserLean>();
+    } catch (error: unknown) {
+      this.logger.error(
+        "Failed to query user by email",
+        error instanceof Error ? error.stack : undefined,
+        { operation: "save" },
+      );
+      throw new DatabaseErrorException();
+    }
+
+    // Business invariant — derived from the successful query result, not a failure:
+    if (existing) throw new UserAlreadyExistsException(command.email);
+
+    try {
+      const doc = await this.model.create(command);
+      return UserMapper.toDomain(doc);
+    } catch (error: unknown) {
+      this.logger.error(
+        "Failed to persist user",
+        error instanceof Error ? error.stack : undefined,
+        { operation: "save" },
+      );
+      throw new DatabaseErrorException();
+    }
+  }
+
+  async findByEmail(props: FindByEmailProps): Promise<User> {
+    let doc: UserLean | null;
+    try {
+      doc = await this.model.findOne({ email: props.email }).lean<UserLean>();
+    } catch (error: unknown) {
+      this.logger.error(
+        "Failed to query user by email",
+        error instanceof Error ? error.stack : undefined,
+        { operation: "findByEmail" },
+      );
+      throw new DatabaseErrorException();
+    }
+
+    if (!doc) throw new UserNotFoundException(props.email); // business invariant
+    return UserMapper.toDomain(doc);
   }
 }
 ```
+
+### Persistence — Schema, Lean Reads & Mapper
+
+The adapter persists through a Mongoose schema and rebuilds domain entities with a mapper. The
+schema `extends Document`, enables `timestamps`, and owns its indexes; reads use `.lean()` with an
+explicit lean type, and the mapper's `toDomain` rebuilds the entity from that plain object.
+
+```typescript
+// infrastructure/driven/persistence/user.schema.ts
+import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
+import { Document } from "mongoose";
+
+@Schema({ timestamps: true, collection: "users" })
+export class UserDocument extends Document {
+  @Prop({ required: true })
+  name: string;
+
+  @Prop({ required: true })
+  email: string;
+
+  // `timestamps: true` populates these; declare them so the mapper reads them typed.
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export const UserSchema = SchemaFactory.createForClass(UserDocument);
+
+// Indexes are an intrinsic property of the schema — declare them here.
+UserSchema.index({ email: 1 }, { unique: true });
+```
+
+```typescript
+// infrastructure/driven/persistence/user.mapper.ts
+import { type FlattenMaps, type Types } from "mongoose";
+import { User } from "@/modules/user/domain/entities/user.entity";
+import { type UserDocument } from "./user.schema";
+
+// Shape returned by `.lean()` — a plain object, not a hydrated document.
+export type UserLean = FlattenMaps<UserDocument> & { _id: Types.ObjectId };
+
+export class UserMapper {
+  static toDomain(raw: UserLean): User {
+    return new User(
+      String(raw._id),
+      raw.name,
+      raw.email,
+      raw.createdAt,
+      raw.updatedAt,
+    );
+  }
+}
+```
+
+Rules:
+
+- The schema class **extends `Document`**, lives in `infrastructure/driven/persistence/`, and
+  declares `createdAt` / `updatedAt` (populated by `timestamps: true`) so the mapper reads them typed.
+- Indexes are intrinsic to the schema — declare them with `Schema.index(...)` next to it.
+- Reads use `.lean<XxxLean[]>()` where `XxxLean = FlattenMaps<XxxDocument> & { _id: Types.ObjectId }`;
+  the mapper method is **`toDomain`** and converts the id with `String(raw._id)`.
+- Mappers never leak Mongoose types upward — they return domain entities only.
+
+### Criteria-based Repositories
+
+When a repository needs dynamic filtering + ordering + pagination, it exposes a single
+`matching(criteria: Criteria)` method instead of many `findByX`. The `Criteria` value objects live
+in `src/base/lib/domain/criteria/` and the Mongo converter (`CriteriaToMongoConverter`, turning a
+`Criteria` into `{ filter, sort, skip, limit }`) in `src/base/lib/infrastructure/criteria/` — both
+are technical machinery, never inside a module or `modules/shared/`.
+
+```typescript
+// domain/ports/user.repository.ts
+export interface MatchingUsers {
+  items: User[];
+  total: number;
+}
+
+export interface UserRepository {
+  matching(criteria: Criteria): Promise<MatchingUsers>;
+}
+```
+
+```typescript
+// infrastructure/driven/persistence/mongo-user.repository.ts
+async matching(criteria: Criteria): Promise<MatchingUsers> {
+  const { filter, sort, skip, limit } = this.converter.convert(
+    criteria,
+    FILTERABLE_FIELDS, // per-repository whitelist: field → 'string' | 'number' | 'boolean' | 'date'
+  );
+
+  let docs: UserLean[];
+  let total: number;
+  try {
+    [docs, total] = await Promise.all([
+      this.model.find(filter).sort(sort).skip(skip).limit(limit).lean<UserLean[]>().exec(),
+      this.model.countDocuments(filter).exec(),
+    ]);
+  } catch (error: unknown) {
+    this.logger.error(
+      "Failed to query users from database",
+      error instanceof Error ? error.stack : undefined,
+      { operation: "matching" },
+    );
+    throw new DatabaseErrorException();
+  }
+
+  return { items: docs.map((doc) => UserMapper.toDomain(doc)), total };
+}
+```
+
+`FILTERABLE_FIELDS` doubles as the whitelist (a field absent from it is rejected) and the type map
+the converter uses to coerce raw string values. For the full Criteria pattern (value objects,
+operators, converter implementation), see the **`criteria-pattern`** skill.
 
 ### Command / Query (use case input)
 
@@ -955,7 +1207,6 @@ export class UserCreatorMapper {
 
 ```typescript
 // application/use-cases/user-creator/user-creator.use-case.ts
-import { Result } from "@/base/lib/domain/result";
 import { UseCase } from "@/base/lib/application/use-case.base";
 import { CreateUserCommand } from "../../domain/props/create-user.command";
 import { UserCreatorMapper } from "./mapper/user-creator.mapper";
@@ -967,10 +1218,11 @@ export class UserCreator extends UseCase<CreateUserCommand, UserCreatorOutput> {
     @Inject(USER_REPOSITORY) private readonly userRepository: UserRepository,
   ) {}
 
-  async execute(command: CreateUserCommand): Promise<Result<UserCreatorOutput>> {
-    const result = await this.userRepository.save(command);
-    if (result.isErr()) return Result.err(result.getError());
-    return Result.ok(UserCreatorMapper.toOutput(result.getValue()));
+  async execute(command: CreateUserCommand): Promise<UserCreatorOutput> {
+    // The port throws (e.g. UserAlreadyExistsException) on the error path; let it
+    // propagate to the global DomainExceptionFilter.
+    const user = await this.userRepository.save(command);
+    return UserCreatorMapper.toOutput(user);
   }
 }
 ```
@@ -980,13 +1232,13 @@ For a collection use case, return `Paginated<Output>`:
 ```typescript
 // application/use-cases/user-finder/user-finder.use-case.ts
 export class UserFinder extends UseCase<FindUsersQuery, Paginated<UserFinderOutput>> {
-  async execute(query: FindUsersQuery): Promise<Result<Paginated<UserFinderOutput>>> {
-    const result = await this.userRepository.matching(/* criteria */);
-    if (result.isErr()) return Result.err(result.getError());
-
-    const { items, total } = result.getValue();
-    return Result.ok(
-      new Paginated(items.map(UserFinderMapper.toOutput), total, query.page, query.limit),
+  async execute(query: FindUsersQuery): Promise<Paginated<UserFinderOutput>> {
+    const { items, total } = await this.userRepository.matching(/* criteria */);
+    return new Paginated(
+      items.map(UserFinderMapper.toOutput),
+      total,
+      query.page,
+      query.limit,
     );
   }
 }
@@ -994,35 +1246,42 @@ export class UserFinder extends UseCase<FindUsersQuery, Paginated<UserFinderOutp
 
 ---
 
-## Result Interceptor {#result-interceptor}
+## Domain Exception Filter {#domain-exception-filter}
 
-Lives in `src/base/config/nestjs/result.interceptor.ts`:
+Domain and application code **throw** a `DomainException` on the error path; use cases and
+controllers never catch it. The thrown `DomainException` (which extends `Error`) is caught by
+this global filter and mapped to the proper `HttpException` **by its `code`** — never by class
+name (`constructor.name` breaks under minification and renames silently).
+
+Lives in `src/base/config/nestjs/domain-exception.filter.ts`:
 
 ```typescript
-import { Result } from "@/base/lib/domain/result";
+import {
+  type ArgumentsHost,
+  Catch,
+  ConflictException,
+  type ExceptionFilter,
+  HttpException,
+  InternalServerErrorException,
+  NotFoundException,
+} from "@nestjs/common";
+import type { Response } from "express";
+import { DomainException } from "@/base/lib/domain/domain-exception.base";
 
-@Injectable()
-export class ResultInterceptor implements NestInterceptor {
-  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    return next.handle().pipe(
-      map((data) => {
-        if (data instanceof Result) {
-          if (data.isErr()) {
-            throw this.mapToHttpException(data.getError());
-          }
-          return data.getValue();
-        }
-        return data;
-      }),
-    );
+@Catch(DomainException)
+export class DomainExceptionFilter implements ExceptionFilter {
+  catch(exception: DomainException, host: ArgumentsHost) {
+    const response = host.switchToHttp().getResponse<Response>();
+    const httpException = this.mapToHttpException(exception);
+    response.status(httpException.getStatus()).json(httpException.getResponse());
   }
 
   private mapToHttpException(error: DomainException): HttpException {
     const map: Record<string, HttpException> = {
-      UserNotFoundException: new NotFoundException(error.message),
-      UserAlreadyExistsException: new ConflictException(error.message),
+      USER_NOT_FOUND: new NotFoundException(error.message),
+      USER_ALREADY_EXISTS: new ConflictException(error.message),
     };
-    return map[error.constructor.name] ?? new InternalServerErrorException();
+    return map[error.code] ?? new InternalServerErrorException();
   }
 }
 ```
@@ -1030,8 +1289,12 @@ export class ResultInterceptor implements NestInterceptor {
 Register globally in `main.ts`:
 
 ```typescript
-app.useGlobalInterceptors(new ResultInterceptor());
+app.useGlobalFilters(new DomainExceptionFilter());
 ```
+
+This filter is the **only** domain-error-to-HTTP mechanism. Controllers return wrapper
+instances (`SingleResponse` / `PaginatedResponse`) directly and let any `DomainException`
+propagate to the filter — there is no `Result` type and no Result-unwrapping interceptor.
 
 ---
 
@@ -1225,20 +1488,17 @@ export class PaginatedResponse<T> {
 
 ```typescript
 // infrastructure/driving/http/create-user/create-user.http.controller.ts
-import { Body, Controller, Inject, Post } from "@nestjs/common";
+import { Body, Controller, Post } from "@nestjs/common";
 import { SingleResponse } from "@/base/lib/infrastructure/single-response";
-import { USER_DI_TOKENS } from "@/modules/user/domain/user.di-tokens";
 import type { UserCreatorOutput } from "@/modules/user/application/use-cases/user-creator/user-creator.output";
-import type { UserCreator } from "@/modules/user/application/use-cases/user-creator/user-creator.use-case";
+import { UserCreator } from "@/modules/user/application/use-cases/user-creator/user-creator.use-case";
 import { CreateUserRequestDto } from "./dto/create-user.request.dto";
 import { CreateUserMapper } from "./mapper/create-user.mapper";
 
 @Controller("users")
 export class CreateUserHttpController {
-  constructor(
-    @Inject(USER_DI_TOKENS.USER_CREATOR)
-    private readonly userCreator: UserCreator,
-  ) {}
+  // Use case injected by class — it implements no interface, so no token.
+  constructor(private readonly userCreator: UserCreator) {}
 
   @Post()
   async handle(
@@ -1246,11 +1506,13 @@ export class CreateUserHttpController {
   ): Promise<SingleResponse<UserCreatorOutput>> {
     const command =
       CreateUserMapper.createUserRequestDtoToCreateUserCommand(dto);
-    const result = await this.userCreator.execute(command);
+    // The use case returns the Output directly and throws a DomainException on
+    // the error path; the global DomainExceptionFilter maps it to HTTP.
+    const output = await this.userCreator.execute(command);
 
-    // ResultInterceptor unwraps Result and throws on failure;
-    // the use case already returns the Output, ready to wrap.
-    return new SingleResponse(result.getValue());
+    // Return the wrapper instance directly so the metadata interceptor can
+    // enrich it; the use case already returns the Output, ready to wrap.
+    return new SingleResponse(output);
   }
 }
 ```
@@ -1264,21 +1526,15 @@ controller has no response mapper — it wraps the Output list and derives `tota
 // infrastructure/driving/http/find-all-users/find-all-users.http.controller.ts
 @Controller("users")
 export class FindAllUsersHttpController {
-  constructor(
-    @Inject(USER_DI_TOKENS.USER_FINDER)
-    private readonly userFinder: UserFinder,
-  ) {}
+  constructor(private readonly userFinder: UserFinder) {}
 
   @Get()
   async handle(
     @Query() query: FindAllUsersRequestDto,
   ): Promise<PaginatedResponse<UserFinderOutput>> {
-    const result = await this.userFinder.execute(
+    const { items, total, page, limit } = await this.userFinder.execute(
       FindAllUsersMapper.toQuery(query),
     );
-    if (result.isErr()) throw result.getError();
-
-    const { items, total, page, limit } = result.getValue();
     const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
     return new PaginatedResponse(items, { page, limit, total, totalPages });
   }
@@ -1289,18 +1545,15 @@ export class FindAllUsersHttpController {
 
 ```typescript
 // infrastructure/driving/rpc/product-created/product-created.rpc.controller.ts
-import { Controller, Inject } from "@nestjs/common";
+import { Controller } from "@nestjs/common";
 import { EventPattern, Payload } from "@nestjs/microservices";
-import { PRODUCT_DI_TOKENS } from "@/modules/product/domain/product.di-tokens";
+import { ProductProjector } from "@/modules/product/application/use-cases/product-projector/product-projector.use-case";
 import { ProductCreatedRequestDto } from "./dto/product-created.request.dto";
 import { ProductCreatedMapper } from "./mapper/product-created.mapper";
 
 @Controller()
 export class ProductCreatedRpcController {
-  constructor(
-    @Inject(PRODUCT_DI_TOKENS.PRODUCT_PROJECTOR)
-    private readonly productProjector: ProductProjector,
-  ) {}
+  constructor(private readonly productProjector: ProductProjector) {}
 
   @EventPattern("product.created")
   async handle(@Payload() dto: ProductCreatedRequestDto): Promise<void> {
@@ -1334,7 +1587,7 @@ src/base/config/<concern>/
 | 1   | **Client class**         | `base/config/<concern>/<library>.<concern>.client.ts`                         | Wraps the third-party SDK. Injects `EnvVarsService` for config and `LoggerPort` for structured logging. Encapsulates retry logic, error mapping, and correlation-id propagation. |
 | 2   | **Global module**        | `base/config/<concern>/<concern>.client.module.ts`                            | `@Global() @Module` that provides the client via a `Symbol` DI token and exports it. Registered once in `AppModule`.                                                             |
 | 3   | **Env vars**             | `base/config/env/env-vars.schema.ts` + `env-vars.service.ts` + `.env.example` | All three files updated simultaneously with the new variables.                                                                                                                   |
-| 4   | **Exception** (optional) | `base/config/<concern>/exception/<concern>-error.exception.ts`                | Typed error class extending `DomainException` with a static factory method `fromSdkError(error)` for consistent error mapping.                                                   |
+| 4   | **Exception** (optional) | `base/config/<concern>/exception/<concern>-error.exception.ts`                | Typed error class extending `DomainException` (stable `code`, message via `super`) with a static factory method `fromSdkError(error)` for consistent error mapping.                                                   |
 
 ### Existing implementations
 

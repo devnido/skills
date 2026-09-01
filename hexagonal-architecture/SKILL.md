@@ -10,13 +10,22 @@ description: >
   conventions, how to organize code, where to place a file, or how layers connect. Even
   if the user doesn't explicitly mention "hexagonal" or "architecture", use this skill
   any time the task involves generating, moving, or restructuring TypeScript project files.
+  Do NOT trigger for non-TypeScript work, standalone scripts, tooling/config-only changes
+  (CI, linters, dotfiles), or repositories that are not one of the six supported project
+  types (e.g. documentation or skills repos).
 ---
 
 # Hexagonal Architecture Skill
 
 This skill enforces a consistent hexagonal architecture (Ports & Adapters) across all
-TypeScript projects. Before generating any file or folder, read the appropriate reference
-file for the project type.
+TypeScript projects. This file is the router and rule digest. **Before generating any file
+or folder, read TWO reference files:**
+
+1. `references/universal-conventions.md` — full universal rules and the canonical code
+   templates (Result, base classes, Paginated, wrappers, entity/VO/port rules, env/utils
+   conventions). **Mandatory for every task** — the digest below summarizes it but the
+   reference is the source of truth.
+2. The project-type reference (table below) — framework-specific structure, DI, and setup.
 
 ## Project Type Detection
 
@@ -31,16 +40,33 @@ Identify the project type from context (package.json, existing structure, or use
 | React Native | Expo + React Navigation | `references/frontend-mobile-react-native.md` |
 | Next.js | Next.js + App Router | `references/frontend-nextjs.md` |
 
-**Always read the reference file before generating any structure.**
+**Always read the reference files before generating any structure.**
 
 > If you cannot determine the project type from `package.json`, folder structure, or user
 > description, **ask the user before generating anything**. Never guess the project type.
 
+### Monorepos (multiple projects in one repo)
+
+- The **nearest `package.json`** walking up from the file you are touching defines the
+  project and its type. A root `package.json` with `workspaces` (or `pnpm-workspace.yaml`,
+  `turbo.json`, `nx.json`) is **not a project** — it is orchestration; never detect the
+  type from it.
+- Every path in this skill (`src/`, `tests/`, `.env.example`, ESLint config) is relative
+  to **that project's root**, never the repo root.
+- **Each project is its own hexagon.** Never import code from a sibling project — services
+  talk only through their public contracts (REST API, message broker). This is the
+  "modules never import other modules" rule, one level up.
+- The duplication of `src/base/` across sibling projects is **deliberate** (it is the
+  price of each service's autonomy). Do not "deduplicate" it into a repo-level shared
+  folder or workspace package — extracting a shared package is an explicit user decision,
+  never the agent's initiative.
+- A task that spans two projects is N sub-tasks: re-read the matching reference when
+  entering each project. If it is unclear which project a change belongs to, **ask**.
+
 ---
 
-## Universal Rules (apply to ALL project types)
+## Layers
 
-### Layers
 Every project has exactly 3 layers (backend) or 4 layers (frontend):
 1. **domain/** — entities, value objects, ports (interfaces), domain errors, domain events
 2. **application/** — use cases, DTOs, application errors
@@ -53,7 +79,8 @@ Every project has exactly 3 layers (backend) or 4 layers (frontend):
 
 This split makes the hexagonal direction explicit: driving adapters push into the hexagon, driven adapters are pushed by the hexagon.
 
-### Naming Conventions — Classes & Interfaces
+## Naming Conventions — Classes & Interfaces
+
 | Concept | Convention | Example |
 |---|---|---|
 | Port (interface) | `<Entity><Role>` | `UserRepository` |
@@ -91,7 +118,8 @@ This split makes the hexagonal direction explicit: driving adapters push into th
 | Layout (SPA) | `<Scope>Layout.tsx\|vue` | `PublicLayout.tsx`, `PrivateLayout.tsx` |
 | Layout ViewModel (SPA) | `use<Scope>LayoutViewModel.ts` | `usePrivateLayoutViewModel.ts` |
 
-### Naming Conventions — File Suffixes
+## Naming Conventions — File Suffixes
+
 | Concept | Suffix | Example |
 |---|---|---|
 | Entity | `.entity.ts` | `user.entity.ts` |
@@ -122,730 +150,31 @@ This split makes the hexagonal direction explicit: driving adapters push into th
 
 All file names use **kebab-case**. Never use camelCase or PascalCase for file names.
 
-### Result Pattern (manual)
-Every project includes a manual `Result<T>` class in `src/base/lib/domain/result.ts`. The error type is **always `DomainException`** — it is not a generic parameter:
-
-```typescript
-// src/base/lib/domain/result.ts
-import type { DomainException } from './domain-exception.base'
-
-export class Result<T> {
-  private constructor(
-    private readonly value?: T,
-    private readonly error?: DomainException,
-  ) {}
-
-  static ok<T>(value: T): Result<T> {
-    return new Result<T>(value, undefined)
-  }
-
-  static err<T = never>(error: DomainException): Result<T> {
-    return new Result<T>(undefined, error)
-  }
-
-  isOk(): boolean {
-    return this.error === undefined
-  }
-
-  isErr(): boolean {
-    return this.error !== undefined
-  }
-
-  getValue(): T {
-    if (this.isErr()) throw new Error('Cannot get value of an error result')
-    return this.value as T
-  }
-
-  getError(): DomainException {
-    if (this.isOk()) throw new Error('Cannot get error of a success result')
-    return this.error as DomainException
-  }
-}
-```
-
-Rules:
-- Use `Result.ok(value)` and `Result.err(error)` in **domain** and **application** layers of ALL projects
-- The error side is always `DomainException` — any concrete exception (e.g. `UserNotFoundException`) works because it `extends DomainException`
-- In **backend**: convert error results to `HttpException` at the infrastructure boundary via a global interceptor
-- In **frontend**: use `try/catch` in infrastructure and presentation layers
-- Never throw domain errors — always return `Result.err(new DomainException())`
-
-### Domain Base Classes
-Every project includes these abstract base classes in `src/base/lib/domain/`. **Generate each file exactly as shown — do not rename classes:**
-
-```typescript
-// src/base/lib/domain/command.base.ts
-export abstract class Command {}
-
-// src/base/lib/domain/query.base.ts
-export abstract class Query {}
-
-// src/base/lib/domain/props.base.ts
-export abstract class Props {}
-
-// src/base/lib/domain/domain-exception.base.ts
-export abstract class DomainException {}
-
-// src/base/lib/domain/output.base.ts (backend only — base for use-case Outputs)
-export abstract class Output {}
-
-// src/base/lib/domain/event.base.ts (backend only)
-export interface EventMetadata {
-  eventId: string
-  occurredAt: Date
-}
-
-export abstract class Event implements EventMetadata {
-  readonly eventId: string = crypto.randomUUID()
-  readonly occurredAt: Date = new Date()
-}
-```
-
-All Commands, Queries, Props, Events, domain errors, and use-case Outputs must extend these base classes:
-```typescript
-// domain/props/create-user.command.ts (backend)
-import { Command } from '@/base/lib/domain/command.base'
-export class CreateUserCommand extends Command { ... }
-
-// domain/props/create-user.props.ts (frontend)
-import { Props } from '@/base/lib/domain/props.base'
-export class CreateUserProps extends Props { ... }
-
-// domain/exceptions/user-not-found.exception.ts
-import { DomainException } from '@/base/lib/domain/domain-exception.base'
-export class UserNotFoundException extends DomainException { ... }
-
-// domain/events/user-created.event.ts (backend only)
-import { Event } from '@/base/lib/domain/event.base'
-export class UserCreatedEvent extends Event {
-  constructor(public readonly userId: string, public readonly email: string) { super() }
-}
-
-// application/use-cases/spots-finder/spots-finder.output.ts (backend only)
-import { Output } from '@/base/lib/domain/output.base'
-export class SpotsFinderOutput extends Output { ... }
-```
-
-### Paginated Container (domain — universal)
-Every project includes a generic `Paginated<T>` class in `src/base/lib/domain/paginated.ts`.
-It is the canonical return shape for any use case that yields a collection. **Generate this file
-exactly as shown:**
-
-```typescript
-// src/base/lib/domain/paginated.ts
-export class Paginated<T> {
-  readonly items: T[]
-  readonly total: number
-  readonly page: number
-  readonly limit: number
-
-  constructor(items: T[], total: number, page: number, limit: number) {
-    this.items = items
-    this.total = total
-    this.page = page
-    this.limit = limit
-  }
-}
-```
-
-Rules:
-- A use case returning a collection returns `Paginated<Output>` (backend) or `Paginated<Entity>`
-  (frontend), never a raw array.
-- **No `totalPages` field.** `totalPages` is a derived presentation value computed at the
-  infrastructure boundary (the controller, when wrapping in `PaginatedResponse`), not in the
-  application layer.
-- `Paginated<T>` is instantiated directly (`new Paginated(items, total, page, limit)`), so its
-  file is `paginated.ts` (not `*.base.ts`, which is reserved for abstract bases meant to be
-  extended).
-
-### Domain Entity Rules
-Domain entities (e.g. `User`, `Product`, `Spot`) represent persisted business objects and follow strict construction rules.
-
-**1. Required attributes — every domain entity MUST have:**
-- `id` — non-nullable, assigned by the persistence layer (or generated upstream when justified)
-- `createdAt: Date` — non-nullable, set when the entity is first persisted
-- `updatedAt: Date` — non-nullable, updated on every mutation
-
-These three fields are **never optional and never nullable**. An object missing any of them is not a valid domain entity.
-
-```typescript
-// domain/entities/user.entity.ts
-export class User {
-  constructor(
-    public readonly id: string,
-    public readonly email: string,
-    public readonly name: string,
-    public readonly createdAt: Date,
-    public readonly updatedAt: Date,
-  ) {}
-}
-```
-
-There is **no** shared `Entity` base class. Each entity declares its own fields explicitly.
-
-**2. Instantiation rules — `new <Entity>(...)` is only allowed in two places:**
-
-   **a) Inside an infrastructure → domain mapper** (the canonical case). Adapters receive raw data from a data source (DB row, HTTP response, ORM model) and a mapper rebuilds the entity:
-   ```typescript
-   // infrastructure/mappers/user.mapper.ts
-   export class UserMapper {
-     static toDomain(raw: UserRecord): User {
-       return new User(raw.id, raw.email, raw.name, raw.created_at, raw.updated_at)
-     }
-   }
-   ```
-
-   **b) Inside a use case, only when ALL of the following hold:**
-   - Every required field (`id`, `createdAt`, `updatedAt`, plus all business fields) is already available in memory — no nullables, no placeholders, no `new Date()` fillers for `createdAt` of something that hasn't been persisted yet.
-   - There is a **justifiable purpose** for constructing it in the use case rather than delegating to an adapter (e.g. assembling an entity from already-fetched pieces, in-memory projection, test fixtures inside the use case is **not** a valid reason).
-   - If in doubt, delegate to the adapter and let the mapper build it.
-
-**3. Forbidden:**
-- ❌ Instantiating an entity in presentation, application orchestration, or anywhere else.
-- ❌ Instantiating an entity to represent data that does **not yet exist** in the data source (e.g. "build a `User` to pass to `userRepository.create(user)`"). For creation/modification flows, pass a `Command`, `Query`, or `Props` to the adapter — the adapter persists and returns the fully-formed entity.
-- ❌ Making `id`, `createdAt`, or `updatedAt` optional, nullable, or defaulted in the constructor.
-
-**4. Data flow for create/update:**
-```
-Presentation (FormModel)
-  → FormMapper.toProps()
-  → UseCase.execute(props)
-  → Adapter.create(props)         ← adapter persists, receives id/timestamps from DB
-  → Mapper.toDomain(record)       ← entity instantiated HERE
-  → returned up the stack as User
-```
-The use case **never** calls `new User(...)` to hand it to the adapter for creation.
-
-### Port Parameters Convention
-Port functions (repository methods, service methods) receive their parameters as domain classes. There are 3 cases:
-
-**Case 1 — Same params as the use case:** reuse the Input directly (Command/Query/Props)
-```typescript
-// The port receives the same Command the use case received
-export interface UserRepository {
-  save(command: CreateUserCommand): Promise<Result<User>>
-}
-```
-
-**Case 2 — Publishing an event (backend only):** create an Event class in `domain/events/`
-```typescript
-// The port publishes an event to a message queue
-export interface EventBus {
-  publish(event: UserCreatedEvent): Promise<Result<void>>
-}
-```
-
-**Case 3 — Different params:** create a `<FunctionName>Props` class in `domain/props/`
-```typescript
-// domain/props/find-by-email.props.ts
-import { Props } from '@/base/lib/domain/props.base'
-export class FindByEmailProps extends Props {
-  constructor(public readonly email: string) { super() }
-}
-
-// The port receives a specific Props class
-export interface UserRepository {
-  findByEmail(props: FindByEmailProps): Promise<Result<User>>
-}
-```
-
-### UseCase Base Class
-Every project includes an abstract `UseCase` class in `src/base/lib/application/use-case.base.ts`. **Generate this file exactly as shown — do not rename the class, generics, or method:**
-
-```typescript
-// src/base/lib/application/use-case.base.ts
-import type { Result } from '../domain/result'
-import type { Command } from '../domain/command.base'
-import type { Query } from '../domain/query.base'
-import type { Props } from '../domain/props.base'
-
-type Input = Command | Query | Props
-
-export abstract class UseCase<I extends Input, O> {
-  abstract execute(input: I): Result<O> | Promise<Result<O>>
-}
-```
-
-All use cases **extend** this class (never `implements`). **Backend use cases return an
-`Output` (or `Paginated<Output>`) — never a domain entity or an infra DTO.** Frontend use cases
-return domain data (the presentation layer adapts it via Screen Mapper / Presentation Model).
-```typescript
-// Backend — single result
-export class SpotCreator extends UseCase<CreateSpotCommand, SpotCreatorOutput> {
-  execute(command: CreateSpotCommand): Promise<Result<SpotCreatorOutput>> {
-    // ...
-  }
-}
-
-// Backend — paginated collection
-export class SpotsFinder extends UseCase<FindSpotsQuery, Paginated<SpotsFinderOutput>> {
-  execute(query: FindSpotsQuery): Promise<Result<Paginated<SpotsFinderOutput>>> {
-    // ...
-  }
-}
-
-// Frontend — returns domain data
-export class UserCreator extends UseCase<CreateUserProps, User> {
-  execute(props: CreateUserProps): Promise<Result<User>> {
-    // ...
-  }
-}
-```
-
-### Use Case Output & Mapper Convention (backend only)
-
-A backend use case never returns a domain entity or an infrastructure DTO. It returns a
-dedicated **Output** class, and a colocated **Mapper** turns the port's result (usually a
-domain entity) into that Output. This keeps the application layer self-contained: it owns its
-own return contract and never reaches into `infrastructure/`.
-
-**Folder layout** — every use case folder holds three things:
-```
-application/use-cases/spots-finder/
-├── spots-finder.use-case.ts      ← SpotsFinder (orchestration)
-├── spots-finder.output.ts        ← SpotsFinderOutput extends Output (return contract)
-└── mapper/
-    └── spots-finder.mapper.ts     ← SpotsFinderMapper (domain entity → Output)
-```
-
-**1. Output** (`<use-case>.output.ts`, class `<UseCase>Output extends Output`):
-- A curated selection of the fields the API actually exposes — it strips heavy arrays,
-  internal flags, and anything sensitive.
-- Dates are serialized to ISO strings here (the Output is what the controller hands to the
-  response wrapper, so it carries the final shape).
-- May reuse domain value-object types (e.g. `Location`) since `application → domain` is allowed.
-
-```typescript
-// application/use-cases/spots-finder/spots-finder.output.ts
-import { Output } from '@/base/lib/domain/output.base'
-import { type Location } from '@/modules/shared/domain/value-objects/location'
-
-export class SpotsFinderOutput extends Output {
-  readonly id: string
-  readonly name: string
-  readonly location: Location
-  readonly totalLikes: number
-  readonly createdAt: string // ISO 8601
-  // …only the fields the API exposes
-  constructor(props: SpotsFinderOutputProps) {
-    super()
-    // assign each field from props
-  }
-}
-```
-
-**2. Mapper** (`mapper/<use-case>.mapper.ts`, static class `<UseCase>Mapper`):
-- One static method, `toOutput(entity): <UseCase>Output`, mapping the port's domain entity to
-  the Output. (Add `toOutputList` only if a caller needs it; usually `items.map(Mapper.toOutput)`
-  is enough.)
-- The method name stays terse (`toOutput`) — the class name already names the use case.
-
-```typescript
-// application/use-cases/spots-finder/mapper/spots-finder.mapper.ts
-import { type Spot } from '@/modules/spot/domain/entities/spot.entity'
-import { SpotsFinderOutput } from '../spots-finder.output'
-
-export class SpotsFinderMapper {
-  static toOutput(spot: Spot): SpotsFinderOutput {
-    return new SpotsFinderOutput({
-      id: spot.id,
-      name: spot.name,
-      location: { ...spot.location },
-      totalLikes: spot.totalLikes,
-      createdAt: spot.createdAt.toISOString(),
-      // …
-    })
-  }
-}
-```
-
-**3. Use case** orchestrates only — call the port, map entities through the Mapper, wrap a
-collection in `Paginated`. No field-by-field assembly, no `totalPages`, no infra imports:
-
-```typescript
-// application/use-cases/spots-finder/spots-finder.use-case.ts
-export class SpotsFinder extends UseCase<FindSpotsQuery, Paginated<SpotsFinderOutput>> {
-  async execute(query: FindSpotsQuery): Promise<Result<Paginated<SpotsFinderOutput>>> {
-    const result = await this.spotRepository.matching(/* criteria */)
-    if (result.isErr()) return Result.err(result.getError())
-
-    const { items, total } = result.getValue()
-    return Result.ok(
-      new Paginated(items.map(SpotsFinderMapper.toOutput), total, query.pageNumber, query.pageSize),
-    )
-  }
-}
-```
-
-**4. Controller** wraps the Output directly (no separate response DTO) and derives `totalPages`
-at the boundary:
-```typescript
-async find(@Query() dto: FindSpotsQueryDto): Promise<PaginatedResponse<SpotsFinderOutput>> {
-  const result = await this.spotsFinder.execute(FindSpotsHttpMapper.toQuery(dto))
-  if (result.isErr()) throw result.getError()
-
-  const { items, total, page, limit } = result.getValue()
-  const totalPages = total === 0 ? 0 : Math.ceil(total / limit)
-  return new PaginatedResponse(items, { page, limit, total, totalPages })
-}
-```
-
-> A single-result use case returns the Output directly (`UseCase<CreateSpotCommand, SpotCreatorOutput>`)
-> and its controller wraps it in `SingleResponse<SpotCreatorOutput>`.
-
-### Form Model & Form Mapper Convention (frontend only)
-
-When a screen has a form, the presentation layer defines:
-
-1. **Form Model** — an `interface` in `presentation/models/` that represents the form fields as the UI sees them
-2. **Form Mapper** — a static class in `presentation/mappers/` that converts the Form Model into the domain `Props` class before calling the use case
-
-This keeps the presentation layer decoupled from the domain: the form works with its own model, and the mapper handles the translation.
-
-```typescript
-// presentation/models/create-user.form-model.ts
-export interface CreateUserFormModel {
-  name: string
-  email: string
-  passwordConfirmation: string  // UI-only field, not part of domain Props
-}
-
-// presentation/mappers/create-user.form-mapper.ts
-import type { CreateUserFormModel } from '../models/create-user.form-model'
-import { CreateUserProps } from '../../domain/props/create-user.props'
-
-export class CreateUserFormMapper {
-  static toProps(form: CreateUserFormModel): CreateUserProps {
-    return new CreateUserProps(form.name, form.email)
-  }
-}
-```
-
-The ViewModel (SPAs) or Server Action (Next.js) uses the mapper:
-```typescript
-// inside ViewModel
-const props = CreateUserFormMapper.toProps(formData)
-const result = await userCreator.execute(props)
-```
-
-Rules:
-- Form Models are **interfaces** (not classes) — they represent plain form state
-- Form Mappers are **static classes** — no instantiation needed
-- The mapper receives the Form Model and returns a domain `Props` instance
-- Fields that exist only in the UI (e.g. `passwordConfirmation`) are stripped by the mapper
-- File naming: `<action>-<entity>.form-model.ts` and `<action>-<entity>.form-mapper.ts`
-
-### Screen Mapper & Presentation Model Convention (frontend only)
-
-Every screen that consumes domain entities defines a **Screen Mapper** that converts those entities into one or more **Presentation Models** tailored to what the UI actually renders. This is the only place in the frontend that translates domain → UI.
-
-**File and class naming:**
-- The mapper file is named after the **screen** in kebab-case: `login-screen.mapper.ts`, `user-profile-screen.mapper.ts`. The class is `<Screen>Mapper`.
-- One mapper per screen, even if the screen consumes multiple entities. A single mapper can map several different entities — that is why it is screen-scoped, not entity-scoped.
-- Presentation Model files use the `.model.ts` suffix and the class/interface ends in `Model`. The base name is **free** (let context decide): a single screen often needs more than one model (`UserSummaryModel`, `UserPermissionsModel`, `RecentActivityModel`), and forcing the screen name on every model would be misleading.
-
-**Method naming inside the mapper:**
-Each mapping method is named after its source and target with the pattern `<source>To<target>`, where the source/target use the original class names (entity, model, dto):
-- `<Entity>DomainTo<Name>Model` — domain entity → presentation model
-- `<Name>ModelTo<Entity>Domain` — presentation model → domain entity (when needed)
-
-This keeps the direction explicit and avoids ambiguous `toModel` / `fromModel` names when one mapper handles multiple types.
-
-```typescript
-// presentation/models/user-summary.model.ts
-export interface UserSummaryModel {
-  fullName: string
-  initials: string
-  joinedLabel: string  // pre-formatted for the UI, e.g. "Joined 2 months ago"
-}
-
-// presentation/models/user-permissions.model.ts
-export interface UserPermissionsModel {
-  canEdit: boolean
-  canDelete: boolean
-}
-
-// presentation/mappers/user-profile-screen.mapper.ts
-import type { User } from '@/modules/user/domain/user.entity'
-import type { UserSummaryModel } from '../models/user-summary.model'
-import type { UserPermissionsModel } from '../models/user-permissions.model'
-
-export class UserProfileScreenMapper {
-  static userDomainToUserSummaryModel(user: User): UserSummaryModel {
-    return {
-      fullName: `${user.firstName} ${user.lastName}`,
-      initials: `${user.firstName[0]}${user.lastName[0]}`.toUpperCase(),
-      joinedLabel: formatRelative(user.createdAt),
-    }
-  }
-
-  static userDomainToUserPermissionsModel(user: User): UserPermissionsModel {
-    return {
-      canEdit: user.role === 'admin' || user.role === 'editor',
-      canDelete: user.role === 'admin',
-    }
-  }
-}
-```
-
-Rules:
-- **Only map fields the UI actually uses**. Never spread an entity or copy fields the screen does not render.
-- One mapper per screen. The mapper file is named after the screen.
-- Method names follow `<Source>To<Target>` using the real class names — never generic `toModel` / `fromModel`.
-- Presentation Models are interfaces (not classes) unless behavior is needed.
-- Models live in `presentation/models/` with free base names + `Model` suffix.
-
-### Driving Vertical Slice Convention (backend only)
-
-`infrastructure/driving/` is organized first by **protocol** (`http/`, `rpc/`, `messaging/`, `cli/`) and inside each protocol by **action folder** — one folder per endpoint / consumer / handler. Each action folder contains everything that endpoint needs, colocated:
-
-```
-infrastructure/
-├── driven/
-│   ├── persistence/
-│   │   ├── mongo-user.repository.ts
-│   │   └── schemas/
-│   │       └── user.schema.ts
-│   └── messaging/
-│       └── publishers/
-│           └── rabbit-event-bus.publisher.ts
-└── driving/
-    ├── http/
-    │   ├── create-user/
-    │   │   ├── dto/
-    │   │   │   └── create-user.request.dto.ts
-    │   │   ├── mapper/
-    │   │   │   └── create-user.mapper.ts
-    │   │   └── create-user.http.controller.ts
-    │   └── find-all-users/
-    │       ├── dto/
-    │       │   └── find-all-users.request.dto.ts   ← pagination/filter query params
-    │       ├── mapper/
-    │       │   └── find-all-users.mapper.ts         ← request DTO → Query only
-    │       └── find-all-users.http.controller.ts
-    └── rpc/
-        └── product-created/
-            ├── dto/
-            │   └── product-created.request.dto.ts
-            ├── mapper/
-            │   └── product-created.mapper.ts
-            └── product-created.rpc.controller.ts
-```
-
-Rules:
-- **One folder per action.** Folder name in kebab-case matches the action (e.g. `create-user/`, `find-all-users/`, `product-created/`).
-- **`dto/` is singular** — contains the **request** side only: `<action>.request.dto.ts` (the inbound HTTP/RPC shape). There is **no response DTO**: the use-case **Output** is the response contract (see *Use Case Output & Mapper Convention*). Omit `dto/` when the action takes no input.
-- **`mapper/` is singular** — contains `<action>.mapper.ts`, mapping the **request DTO → Command/Query** only. Omit the folder if the action takes no input. The class is `<Action>Mapper`. (Distinct from the application-layer use-case `<UseCase>Mapper`, which maps domain entity → Output.)
-- **Controller file** is `<action>.<protocol>.controller.ts`. The class is `<Action><Protocol>Controller` (e.g. `CreateUserHttpController`, `ProductCreatedRpcController`).
-- The controller is the **only** thing that knows about the protocol. The mapper, DTOs, and use case are protocol-agnostic in shape (the DTO names happen to live next to the protocol because they are protocol-shaped).
-
-**Mapper method naming** — the driving mapper handles the **request side only** (response
-shaping lives in the application use-case Mapper → Output, see *Use Case Output & Mapper
-Convention*):
-- `<Action>RequestDtoTo<Action><Command|Query>` — request DTO → application input
-
-```typescript
-// infrastructure/driving/http/create-user/mapper/create-user.mapper.ts
-import { CreateUserCommand } from '@/modules/user/domain/props/create-user.command'
-import type { CreateUserRequestDto } from '../dto/create-user.request.dto'
-
-export class CreateUserMapper {
-  static createUserRequestDtoToCreateUserCommand(dto: CreateUserRequestDto): CreateUserCommand {
-    return new CreateUserCommand(dto.name, dto.email)
-  }
-}
-```
-
-### Response Wrapper Convention (backend only)
-
-Every controller response is wrapped in one of two generic envelopes defined in `src/base/lib/infrastructure/`:
-
-```typescript
-// src/base/lib/infrastructure/single-response.ts
-export class SingleResponse<T> {
-  constructor(public readonly data: T) {}
-}
-
-// src/base/lib/infrastructure/paginated-response.ts
-export interface PaginationMeta {
-  page: number
-  limit: number
-  total: number
-  totalPages: number
-}
-
-export class PaginatedResponse<T> {
-  constructor(
-    public readonly data: T[],
-    public readonly pagination: PaginationMeta,
-  ) {}
-}
-```
-
-Rules:
-- Single-record endpoints return `SingleResponse<<UseCase>Output>`.
-- List/paginated endpoints return `PaginatedResponse<<UseCase>Output>`, built from the use
-  case's `Paginated<Output>`.
-- The controller **derives `totalPages` at the boundary** (`total === 0 ? 0 : Math.ceil(total / limit)`) —
-  the application `Paginated<T>` carries only `items / total / page / limit`.
-- **Never** return a raw entity, raw array, or naked DTO from a controller.
-- The **Output** (built by the use-case Mapper) already includes only the fields the API
-  exposes — internal, derived, and sensitive fields are stripped there, not in the controller.
-
-### Testing Conventions
-| Layer | Test Type | Mock Strategy |
-|---|---|---|
-| `domain/` | Unit tests — pure, no mocks | None |
-| `application/` | Unit tests | Mock ports (interfaces) |
-| `infrastructure/` | Unit tests | Mock HTTP clients, ORM clients, etc. |
-| `presentation/` | Component tests | Mock view models / composables |
-
-Testing frameworks per project type:
-| Project | Framework | Component Testing |
-|---|---|---|
-| NestJS | Jest (included with NestJS) | — |
-| Vue.js | Vitest | `@vue/test-utils` |
-| React SPA | Vitest | `@testing-library/react` |
-| React Native | Jest (included with Expo) | `@testing-library/react-native` |
-| Next.js | Vitest | `@testing-library/react` |
-
-Test files live in a `tests/` folder at the root level, mirroring the `src/` structure:
-```
-src/modules/user/application/use-cases/user-creator/user-creator.use-case.ts
-tests/modules/user/application/use-cases/user-creator/user-creator.use-case.spec.ts
-```
-
-### Code Quality
-All projects use `husky` + `lint-staged` for pre-commit hooks that run linting and formatting automatically.
-
-### Dependency Rule (enforced via `eslint-plugin-boundaries`)
-- Modules **never** import from other modules
-- If something is needed in more than one module → move it to `shared/` (monolith/frontend)
-- `domain/` has zero external dependencies
-- `application/` depends only on `domain/`
-- `infrastructure/` depends on `application/` and `domain/`
-- `presentation/` depends on `application/` and `domain/`
-
-These rules are **enforced at lint time** using `eslint-plugin-boundaries`. Every project installs it as a dev dependency and configures ESLint to define boundary elements (one per layer) with `default: 'disallow'` and explicit `allow` rules matching the list above. Violations fail lint and therefore fail the `lint-staged` pre-commit hook.
-
-See each reference file for the project-specific ESLint configuration — backend and frontend differ in layer count and folder structure.
-
-### src/base Structure
-Every project has a `src/base/` folder with technical cross-cutting concerns:
-
-```
-src/base/
-├── config/          ← technical infrastructure (env, http, logger, di, etc.)
-├── constants/
-│   └── index.ts     ← project-wide constants (export const VARIABLE_NAME = value)
-└── lib/             ← abstract base classes extended by modules
-    ├── domain/         ← result.ts, command.base.ts, query.base.ts, props.base.ts, domain-exception.base.ts, event.base.ts, value-object.base.ts
-    ├── application/    ← use-case.base.ts
-    ├── infrastructure/ ← single-response.ts, paginated-response.ts (backend only)
-    └── utils/          ← pure utility functions grouped by concern
-```
-
-### Environment Variables Convention
-
-Every project follows these rules for environment variables:
-
-**Who creates each file:**
-- `.env.example` — **created by the agent** when scaffolding the project. Contains all required variables with empty or placeholder values. **Committed to the repo.**
-- `.env` / `.env.local` — **created by the developer** with real values. **Never committed** (added to `.gitignore`).
-- `.env.development` / `.env.production` — optional, created by the developer per environment.
-
-**Variable prefix by project type** (enforced by the platform, not optional):
-- **NestJS backend**: no prefix — accessed via `process.env.VAR_NAME`, read through `EnvVarsService`
-- **Vite (Vue, React)**: `VITE_` prefix — only `VITE_*` variables are exposed to the browser via `import.meta.env`
-- **Next.js**: `NEXT_PUBLIC_` prefix for client-accessible variables; no prefix for server-only variables
-- **Expo (React Native)**: `EXPO_PUBLIC_` prefix — only `EXPO_PUBLIC_*` variables are bundled into the app
-
-**Access pattern**: never read `process.env` or `import.meta.env` directly outside of `src/base/config/env/`. All code that needs an env var imports from the centralized env config. This means:
-- One place to validate all env vars at startup
-- One place to fix a missing var
-- Type-safe access everywhere else
-
-See each reference file for the full implementation (schema, service/config, `.env.example`).
-
-### Constants Convention
-All project-wide constants live in `src/base/constants/index.ts`. Use `UPPER_SNAKE_CASE` for names:
-```typescript
-// src/base/constants/index.ts
-export const API_BASE_URL = 'https://api.example.com'
-export const MAX_RETRY_ATTEMPTS = 3
-export const DEFAULT_PAGE_SIZE = 20
-```
-
-### Utils Convention
-Utility functions live in `src/base/lib/utils/`, grouped by concern — one file per topic, multiple functions per file:
-```
-src/base/lib/utils/
-├── index.ts              ← re-exports all utils for clean imports
-├── date.utils.ts         ← formatDate, parseDate, diffInDays, ...
-├── string.utils.ts       ← capitalize, slugify, truncate, ...
-├── number.utils.ts       ← formatCurrency, roundTo, clamp, ...
-├── array.utils.ts        ← chunk, unique, groupBy, ...
-├── object.utils.ts       ← deepClone, pick, omit, ...
-└── validation.utils.ts   ← isEmail, isUrl, isEmpty, ...
-```
-
-Rules:
-- All functions must be **pure** — no external dependencies, no side effects
-- File name convention: `<concern>.utils.ts`
-- If a file grows beyond ~30 functions, split by sub-concern (e.g. `date-format.utils.ts`, `date-parse.utils.ts`)
-- `index.ts` re-exports everything so consumers import from one place: `import { formatDate, slugify } from '@/base/lib/utils'`
-
-Backend also includes:
-```
-src/base/
-├── health/          ← healthcheck controller and module
-└── config/
-    ├── context/     ← correlation ID, request context
-    ├── messaging/   ← message broker client (RabbitMQ by default)
-    └── nestjs/      ← global exception filter, logger interceptor
-```
-
----
-
-## Quick Reference: Use Case File Structure
-
-Every use case lives in its own folder. The input class (Props, Command, or Query) lives in `domain/props/`:
-
-**Frontend:**
-```
-src/.../domain/props/
-└── create-user.props.ts          ← CreateUserProps class
-
-src/.../application/use-cases/user-creator/
-└── user-creator.use-case.ts      ← receives CreateUserProps
-```
-
-**Backend:** the use-case folder holds the use case, its Output, and its Mapper:
-```
-src/.../domain/props/
-├── create-user.command.ts        ← CreateUserCommand class (write operations)
-└── find-user.query.ts            ← FindUserQuery class (read operations)
-
-src/.../application/use-cases/user-creator/
-├── user-creator.use-case.ts      ← receives CreateUserCommand, returns UserCreatorOutput
-├── user-creator.output.ts        ← UserCreatorOutput extends Output
-└── mapper/
-    └── user-creator.mapper.ts     ← UserCreatorMapper (domain entity → Output)
-
-src/.../application/use-cases/user-finder/
-├── user-finder.use-case.ts       ← receives FindUserQuery, returns Paginated<UserFinderOutput>
-├── user-finder.output.ts         ← UserFinderOutput extends Output
-└── mapper/
-    └── user-finder.mapper.ts      ← UserFinderMapper (domain entity → Output)
-```
-
-**Tests:**
-```
-tests/.../application/use-cases/user-creator/
-├── user-creator.use-case.spec.ts
-└── mapper/
-    └── user-creator.mapper.spec.ts
-```
+## Universal Rules — Digest
+
+Full rules and canonical code templates live in `references/universal-conventions.md`.
+Summary of the non-negotiables:
+
+- **Error handling** — **Frontend (Result pattern):** `domain/` and `application/` return `Result<T>` (`Result.ok` / `Result.err`, error side always a `DomainException` subclass); adapters `try/catch` the HTTP client and convert every failure to `Result.err`; the ViewModel unwraps the `Result` and maps the error `code` to UI state — it never throws. **Backend (no Result):** `domain/` and `application/` **throw** `DomainException` directly and return plain values; a global `DomainExceptionFilter` maps the thrown exception's `code` to an `HttpException` (the **only** error-mapping mechanism — no `Result`, no unwrap interceptor). **Backend adapters wrap every technical operation (DB/HTTP/queue/S3 call) in `try/catch`: on failure they log the error and throw an infra `DomainException` tied to that adapter (`DatabaseErrorException`, `DownstreamServiceErrorException`, …, `httpStatus 500`); business "not found"/"duplicate" exceptions are thrown from the successful result, not from the `catch`.**
+- **Domain base classes** (`src/base/lib/domain/`) — `Command`, `Query`, `Props`, `Output` (made nominal via a private `_brand` field) and `DomainException extends Error` (abstract stable `code`, message via `super`); `Event` with `eventId`/`occurredAt` (backend). Every input, output, error, and event extends its base. Generate these files from the templates in the universal reference — never improvise their shape.
+- **`Paginated<T>`** (`src/base/lib/domain/paginated.ts`) — canonical return for collections: `items / total / page / limit`. No `totalPages` — it is derived at the controller boundary.
+- **Domain entities** — `id`, `createdAt`, `updatedAt` are required and non-nullable; no shared `Entity` base class. `new <Entity>(...)` is allowed only in infrastructure→domain mappers (canonical) or, exceptionally, in a use case when every field already exists in memory. Never build an entity for data that doesn't exist yet — pass the Command/Props to the adapter; it persists and returns the entity.
+- **Value objects** — validated single-value VO = class `<Entity><Field>ValueObject`; structural data VO = plain interface without suffix. Business VOs shared by ≥2 modules go in `modules/shared/domain/value-objects/`; aggregate-owned VOs in the module. Never in `src/base/` (technical machinery only).
+- **Port file isolation** — a port file (`domain/ports/<entity>.repository.ts`) declares **only** the port interface(s) and nothing else. Every supporting type it references — argument shapes and return/result wrappers — is extracted to its own file under `domain/props/`, never declared inline in the port file. Example: `SpotRepository` holds only the interface; its `MatchingSpots` result and its `CreateSpotProps` argument each live in `domain/props/`.
+- **Port parameters** — ports receive domain classes: reuse the use case's Command/Query/Props when the params match exactly; an `Event` for publishers; otherwise a dedicated `<FunctionName>Props` in `domain/props/` (suffix `.props.ts`) containing **only the fields that port method needs** (not the whole command). A port's return/result wrapper (e.g. `MatchingSpots = { items; total }`) is likewise its own file in `domain/props/`.
+- **UseCase base** — every use case `extends UseCase<I, O>` (never `implements`). Backend use cases return an `Output` or `Paginated<Output>` — never a domain entity or infra DTO; frontend use cases return domain data. Backend DI: use cases are plain providers injected by class; DI tokens are reserved for ports bound to adapters.
+- **Output & Mapper (backend)** — each use-case folder holds `<uc>.use-case.ts`, `<uc>.output.ts` (curated API fields, dates as ISO strings), and `mapper/<uc>.mapper.ts` with a static `toOutput(entity)`.
+- **Form Model & Form Mapper (frontend)** — forms use an interface FormModel in `presentation/models/` plus a static FormMapper in `presentation/mappers/` that converts to domain `Props`, stripping UI-only fields.
+- **Screen Mapper & Presentation Models (frontend)** — one mapper per screen (`<Screen>Mapper`), methods named `<source>To<target>` (never `toModel`/`fromModel`), models are interfaces with only the fields the UI renders.
+- **MVVM (SPAs & React Native only — never Next.js)** — the Screen (View) is passive: it consumes only its ViewModel's return and never imports `domain/`/`application/`, the DI container, stores, or mappers. The ViewModel (`use<Screen>ViewModel`) receives route params as arguments, self-initializes, builds Props classes, unwraps the use case's `Result`, and returns only Presentation Models + UI state + actions. Next.js uses Server Components + Server Actions instead — there the unwrap point is the Server Component (reads: `notFound()` or throw) and the Server Action (mutations: return a serializable `{ error }`).
+- **Driving vertical slice (backend)** — `infrastructure/driving/<protocol>/<action>/` with `dto/` (request side only — the use-case Output is the response contract), `mapper/` (request DTO → Command/Query), and `<action>.<protocol>.controller.ts`. Only the controller knows the protocol.
+- **Response wrappers (backend)** — every controller returns `SingleResponse<Output>` or `PaginatedResponse<Output>` **directly** (never a `Result`, never a raw entity/array/DTO), deriving `totalPages` at the boundary.
+- **Testing** — domain: pure unit tests; application: unit tests with mocked ports; infrastructure: unit tests with mocked clients; presentation: component tests. Tests live in `tests/` mirroring `src/`. **Generate tests from the canonical templates** in the universal reference (use case, mapper, adapter; ViewModel template in each SPA reference) — mock only at the port / use-case seam; entity fixtures come from builders in `tests/modules/<module>/builders/`.
+- **Dependency rule** (enforced with `eslint-plugin-boundaries`) — a module never imports another module's **internals** (entities, adapters, use cases); shared *business* code goes to `shared/`; `domain/` depends on nothing; `application/` → `domain/`; `infrastructure/` and `presentation/` → `application/` + `domain/`. **Exception — cross-module ports (monolith):** a module MAY import another module's **port interface + its DI token** and inject it (the consumer imports the providing module, which `exports` the token). This is the only sanctioned inter-module import; without it every cross-module contract would be forced into `shared/`. A use case may inject such a port (e.g. `SpotCreator` injecting the skater module's `SKATER_REPOSITORY`) — it depends on the interface, never on the other module's adapter.
+- **`src/base/`** — technical cross-cutting only: `config/`, `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (base classes + pure `utils/` grouped by concern). The Criteria pattern lives in `base/lib/**/criteria/` (see the `criteria-pattern` skill).
+- **Env vars** — the agent creates `.env.example` (committed); platform prefixes are mandatory (`VITE_`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`, none for NestJS); only `src/base/config/env/` reads `process.env` / `import.meta.env`.
+- **Auth & session (frontend)** — tokens are technical machinery in `src/base/config/auth/` (`TokenStorage` port; localStorage / SecureStore / httpOnly cookies per platform); the base HTTP client injects `Authorization` + stable identity headers (e.g. `device-id`) and runs a **single-flight refresh on 401** through a bare client; session state lives in the auth module's store (MVVM rules apply — tokens never enter the store); login/register are a regular `modules/auth/` module. Next.js SSG authenticates with a build-time guest/service token from env vars.
+- **Code quality** — every project uses `husky` + `lint-staged` pre-commit hooks running lint and format.
 
 ---
 
@@ -866,10 +195,10 @@ When the user asks to create a project from scratch, follow these steps:
 
    This step is critical — CLI commands and recommended flags change between versions. Never rely solely on the commands in the reference files; always cross-check with the official docs.
 
-3. **Read the reference file** for that project type (see table above)
+3. **Read `references/universal-conventions.md` and the project-type reference** (see table above)
 4. **Scaffold the project** using the verified CLI command from the official docs
 5. **Install dependencies** listed in the reference file for that project type
-6. **Create `src/base/`** with config and lib folders as described in the reference
+6. **Create `src/base/`** with config and lib folders as described in the references
 7. **Create the first module** (if the user specified a domain) following the folder structure
 8. **Register DI** — wire up ports and adapters in the DI container (NestJS module or Awilix)
 9. **Register routes** — add module routes to the router/navigation config (except Next.js, which uses file system)
@@ -881,7 +210,7 @@ When the user asks to create a project from scratch, follow these steps:
 When the user asks to add a module, feature, use case, or any new files:
 
 1. **Detect the project type** from `package.json`, existing folder structure, or user description
-2. **Read the reference file** for that project type
+2. **Read `references/universal-conventions.md` and the project-type reference**
 3. **Create the module folder structure** inside `src/modules/<domain>/` (monolith/frontend) or `src/app/` (microservice)
 4. **Generate files** following naming conventions (both class names and file suffixes)
 5. **Respect the dependency rule** — domain has no imports from outer layers
@@ -895,10 +224,27 @@ Do not skip steps 6-8 unless the user explicitly says so.
 
 ## Reference Files
 
-For full folder structures, DI patterns, framework-specific conventions, project setup commands, and code examples, read the appropriate reference:
-
+- **Universal conventions (all project types)** → read `references/universal-conventions.md` — full rules and canonical code templates for everything in the digest above
 - **NestJS (monolith or microservice)** → read `references/backend-nestjs.md`
 - **Vue.js SPA** → read `references/frontend-spa-vue.md`
 - **React SPA** → read `references/frontend-spa-react.md`
 - **React Native (Expo)** → read `references/frontend-mobile-react-native.md`
 - **Next.js** → read `references/frontend-nextjs.md`
+
+---
+
+## Maintaining This Skill
+
+This SKILL.md is deliberately thin: it loads in full on every trigger, so every line here
+costs context in every coding task. The full rules and code templates live in
+`references/universal-conventions.md`, which is read on demand. Keep that contract:
+
+- **If a rule keeps getting violated in practice** (the agent skips the reference and
+  generates something wrong), the fix is to **promote that specific rule to the digest
+  above** — one bullet, no code blocks. Do NOT paste the full section back into this file.
+- **New conventions** go into `references/universal-conventions.md` (or the project-type
+  reference if framework-specific), plus at most one digest bullet here.
+- Never duplicate code templates between this file and the references — single source of
+  truth is the reference; drift is worse than verbosity.
+- Any edit to this file must be mirrored in Spanish in `README.es.md` (see the
+  `create-skill` skill, which automates this).

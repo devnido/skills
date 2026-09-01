@@ -9,7 +9,7 @@
 6. [DI with Awilix](#di)
 7. [Props Convention](#props)
 8. [Form Model & Form Mapper](#form-mapper)
-9. [ViewModel Convention](#viewmodel)
+9. [MVVM Convention](#mvvm)
 10. [Router Convention](#router)
 11. [Layouts Convention](#layouts)
 12. [Module Example](#module-example)
@@ -283,7 +283,7 @@ src/base/
     ├── domain/
     │   ├── result.ts              ← manual Result<T> class
     │   ├── props.base.ts          ← abstract class Props
-    │   ├── domain-exception.base.ts   ← abstract class DomainException
+    │   ├── domain-exception.base.ts   ← abstract class DomainException extends Error (abstract `code`)
     │   └── value-object.base.ts
     ├── application/
     │   └── use-case.base.ts
@@ -427,12 +427,14 @@ import { DomainException } from '@/base/lib/domain/domain-exception.base'
 import axios from 'axios'
 
 export class HttpServiceException extends DomainException {
+  readonly code = 'HTTP_SERVICE_ERROR'
+
   constructor(
     public readonly statusCode: number,
-    public readonly message: string,
-    public readonly code?: string,
+    message: string,
+    public readonly downstreamCode?: string,
   ) {
-    super()
+    super(message)
   }
 
   static fromAxiosError(error: unknown): HttpServiceException {
@@ -576,7 +578,7 @@ export class HttpUserRepository implements UserRepository {
     } catch (error) {
       const httpError = error as HttpServiceException
       if (httpError.statusCode === 409) return Result.err(new UserAlreadyExistsException(props.email))
-      return Result.err(new UserAlreadyExistsException(httpError.message))
+      return Result.err(httpError) // HttpServiceException extends DomainException — generic fallback
     }
   }
 }
@@ -621,10 +623,21 @@ modules/user/presentation/
 // src/base/config/di/container.ts
 import { createContainer, asClass, InjectionMode } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
+import type { UserRepository } from '@/modules/user/domain/ports/user.repository'
 import { HttpUserRepository } from '@/modules/user/infrastructure/repositories/http-user.repository'
 import { UserCreator } from '@/modules/user/application/use-cases/user-creator/user-creator.use-case'
+import { UserFinder } from '@/modules/user/application/use-cases/user-finder/user-finder.use-case'
 
-export const container = createContainer({ injectionMode: InjectionMode.CLASSIC })
+// Typed cradle: container.resolve('name') returns the right type, and a typo
+// in a registration name fails at compile time instead of at runtime.
+export interface Cradle {
+  httpClient: AxiosHttpClient
+  userRepository: UserRepository
+  userCreator: UserCreator
+  userFinder: UserFinder
+}
+
+export const container = createContainer<Cradle>({ injectionMode: InjectionMode.CLASSIC })
 
 container.register({
   // Base infrastructure
@@ -635,6 +648,7 @@ container.register({
 
   // Use cases (receive adapters via constructor injection)
   userCreator: asClass(UserCreator).singleton(),
+  userFinder: asClass(UserFinder).singleton(),
 })
 ```
 
@@ -767,60 +781,163 @@ export class UserProfileScreenMapper {
 
 ---
 
-## ViewModel Convention {#viewmodel}
+## MVVM Convention {#mvvm}
 
-- Named: `use<Screen>ViewModel.ts`
-- Lives alongside its screen
-- Consumes use cases via Awilix container
-- Returns state + actions
-- Uses `try/catch` (not Result pattern)
-- When submitting forms, uses a **Form Mapper** to convert the Form Model into domain Props
+The presentation layer follows **MVVM**:
+- **Model** — the Presentation Models / Form Models built by the screen's mappers, plus the module store for cross-screen state.
+- **View** — the Screen component. Passive: it renders state and forwards user intent to the ViewModel.
+- **ViewModel** — the `use<Screen>ViewModel` hook. Owns UI state and orchestration; it is the **driving boundary** of the frontend hexagon (the SPA analog of a backend controller).
+
+> MVVM applies to SPAs and React Native only. Next.js does **not** use ViewModels — it uses
+> Server Components + Server Actions (see `frontend-nextjs.md`).
+
+### ViewModel rules
+
+- Named `use<Screen>ViewModel.ts`, lives alongside its screen. One ViewModel per screen — reusable logic goes to `hooks/`, and a reusable hook must not call use cases.
+- Receives route params as **function arguments** and self-initializes (`useEffect` inside the ViewModel) — the View never orchestrates loading.
+- Resolves use cases from the typed Awilix container **once, at the top** of the hook.
+- Builds use-case inputs as domain **Props classes** (via the Form Mapper for forms) — never object literals.
+- **Unwrap point for `Result`**: use cases return `Result<T>` and never throw (adapters already converted every failure). The ViewModel checks `isErr()` and maps the `DomainException`'s `code` to a user-facing message. `try/catch` is NOT the error channel here — there is nothing to catch.
+- Converts domain entities to Presentation Models via the Screen Mapper before exposing them.
+- Returns **only**: Presentation Models, primitive UI state (`isLoading`, `error`), and action callbacks. Never domain entities, `Result`s, exceptions, or the container.
+- The module store (Zustand) holds **cross-screen** state only; ViewModels read/write it, Views never import it.
+
+### View (Screen) rules
+
+- Consumes exactly what its ViewModel returns — nothing else.
+- Never imports from `domain/` or `application/`, never touches the DI container, stores, or mappers.
+- Local `useState` is allowed only for pure view concerns (e.g. an accordion toggle that doesn't outlive the screen).
+
+### Example — ViewModel
 
 ```typescript
 // useUserProfileViewModel.ts
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { container } from '@/base/config/di/container'
-import type { UserSummaryModel } from '../models/user-summary.model'
-import type { UserPermissionsModel } from '../models/user-permissions.model'
-import type { CreateUserFormModel } from '../models/create-user.form-model'
-import { UserProfileScreenMapper } from '../mappers/user-profile-screen.mapper'
-import { CreateUserFormMapper } from '../mappers/create-user.form-mapper'
+import type { DomainException } from '@/base/lib/domain/domain-exception.base'
+import { FindUserProps } from '../../../domain/props/find-user.props'
+import type { UserSummaryModel } from '../../models/user-summary.model'
+import type { UserPermissionsModel } from '../../models/user-permissions.model'
+import type { CreateUserFormModel } from '../../models/create-user.form-model'
+import { UserProfileScreenMapper } from '../../mappers/user-profile-screen.mapper'
+import { CreateUserFormMapper } from '../../mappers/create-user.form-mapper'
 
-export function useUserProfileViewModel() {
+// Only the codes this screen can produce. Swap literals for i18n keys when needed.
+const ERROR_MESSAGES: Record<string, string> = {
+  USER_NOT_FOUND: 'User not found',
+  USER_ALREADY_EXISTS: 'A user with this email already exists',
+}
+
+function toUiError(error: DomainException): string {
+  return ERROR_MESSAGES[error.code] ?? 'Something went wrong, please try again'
+}
+
+export function useUserProfileViewModel(userId: string) {
+  const userFinder = container.resolve('userFinder')
+  const userCreator = container.resolve('userCreator')
+
   const [summary, setSummary] = useState<UserSummaryModel | null>(null)
   const [permissions, setPermissions] = useState<UserPermissionsModel | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  useEffect(() => {
+    loadUser(userId)
+  }, [userId])
+
   async function loadUser(id: string) {
     setIsLoading(true)
-    try {
-      const userFinder = container.resolve('userFinder')
-      const user = await userFinder.execute({ id })
+    setError(null)
+    const result = await userFinder.execute(new FindUserProps(id))
+    if (result.isErr()) {
+      setError(toUiError(result.getError()))
+    } else {
+      const user = result.getValue()
       setSummary(UserProfileScreenMapper.userDomainToUserSummaryModel(user))
       setPermissions(UserProfileScreenMapper.userDomainToUserPermissionsModel(user))
-    } catch {
-      setError('Failed to load user')
-    } finally {
-      setIsLoading(false)
     }
+    setIsLoading(false)
   }
 
   async function createUser(formData: CreateUserFormModel) {
     setIsLoading(true)
-    try {
-      const userCreator = container.resolve('userCreator')
-      const props = CreateUserFormMapper.toProps(formData)
-      await userCreator.execute(props)
-    } catch {
-      setError('Failed to create user')
-    } finally {
-      setIsLoading(false)
-    }
+    setError(null)
+    const result = await userCreator.execute(CreateUserFormMapper.toProps(formData))
+    if (result.isErr()) setError(toUiError(result.getError()))
+    setIsLoading(false)
   }
 
-  return { summary, permissions, isLoading, error, loadUser, createUser }
+  return { summary, permissions, isLoading, error, createUser }
 }
+```
+
+### Example — View
+
+```tsx
+// UserProfileScreen.tsx
+import { useParams } from 'react-router-dom'
+import { useUserProfileViewModel } from './useUserProfileViewModel'
+
+export function UserProfileScreen() {
+  const { id } = useParams<{ id: string }>()
+  const { summary, permissions, isLoading, error } = useUserProfileViewModel(id ?? '')
+
+  if (isLoading) return <p>Loading…</p>
+  if (error) return <p role="alert">{error}</p>
+  if (!summary) return null
+
+  return (
+    <section>
+      <h1>{summary.fullName}</h1>
+      <span>{summary.joinedLabel}</span>
+      {permissions?.canEdit && <button>Edit</button>}
+    </section>
+  )
+}
+```
+
+### Testing the ViewModel
+
+Mock at the **use-case seam** by overriding the container registrations with `asValue`,
+drive the hook with `renderHook`, and assert only on what the ViewModel returns (the
+View's contract) — never on internals, and never mocking axios/fetch:
+
+```typescript
+// tests/modules/user/presentation/screens/user-profile/useUserProfileViewModel.spec.ts
+import { renderHook, waitFor } from '@testing-library/react'
+import { asValue } from 'awilix'
+import { container } from '@/base/config/di/container'
+import { Result } from '@/base/lib/domain/result'
+import type { UserFinder } from '@/modules/user/application/use-cases/user-finder/user-finder.use-case'
+import { UserNotFoundException } from '@/modules/user/domain/exceptions/user-not-found.exception'
+import { useUserProfileViewModel } from '@/modules/user/presentation/screens/user-profile/useUserProfileViewModel'
+import { buildUser } from '../../../builders/user.builder'
+
+const execute = vi.fn()
+
+beforeEach(() => {
+  execute.mockReset()
+  container.register({ userFinder: asValue({ execute } as unknown as UserFinder) })
+})
+
+it('exposes presentation models when the use case succeeds', async () => {
+  execute.mockResolvedValue(Result.ok(buildUser()))
+
+  const { result } = renderHook(() => useUserProfileViewModel('user-1'))
+
+  await waitFor(() => expect(result.current.isLoading).toBe(false))
+  expect(result.current.summary).not.toBeNull()
+  expect(result.current.error).toBeNull()
+})
+
+it('maps the DomainException code to a UI message on failure', async () => {
+  execute.mockResolvedValue(Result.err(new UserNotFoundException('user-1')))
+
+  const { result } = renderHook(() => useUserProfileViewModel('user-1'))
+
+  await waitFor(() => expect(result.current.error).toBe('User not found'))
+  expect(result.current.summary).toBeNull()
+})
 ```
 
 ---

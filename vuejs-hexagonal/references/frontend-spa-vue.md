@@ -1,4 +1,7 @@
-# Frontend SPA — Vue.js Reference
+# Vue.js SPA Reference — Structure, Setup & MVVM
+
+Framework-specific reference for the `vuejs-hexagonal` skill. Read it together with
+`vue-conventions.md` (the canonical rules and code templates) before generating any file.
 
 ## Table of Contents
 1. [Project Setup](#setup)
@@ -799,8 +802,8 @@ The presentation layer follows **MVVM**:
 - **View** — the Screen component (`.vue` SFC). Passive: it renders state and forwards user intent to the ViewModel.
 - **ViewModel** — the `use<Screen>ViewModel` composable. Owns UI state and orchestration; it is the **driving boundary** of the frontend hexagon (the SPA analog of a backend controller).
 
-> MVVM applies to SPAs and React Native only. Next.js does **not** use ViewModels — it uses
-> Server Components + Server Actions (see `frontend-nextjs.md`).
+> MVVM is the mandatory presentation pattern for this project type. Every screen has a
+> ViewModel; no screen calls a use case directly.
 
 ### ViewModel rules
 

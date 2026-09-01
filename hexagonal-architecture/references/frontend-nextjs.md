@@ -224,6 +224,7 @@ Next.js is treated as its own category — **do NOT apply MVVM or ViewModels her
 | ViewModels | ✅ `useXxxViewModel.ts` | ❌ does not apply |
 | Server Actions | ❌ | ✅ inside `presentation/screens/<screen>/actions/` |
 | `app/` directory | ❌ | ✅ entry point only — delegates to modules |
+| `Result` unwrap point | ViewModel | Server Component (reads) / Server Action (mutations) |
 
 ---
 
@@ -282,7 +283,7 @@ src/base/
     ├── domain/
     │   ├── result.ts              ← manual Result<T> class
     │   ├── props.base.ts          ← abstract class Props
-    │   ├── domain-exception.base.ts   ← abstract class DomainException
+    │   ├── domain-exception.base.ts   ← abstract class DomainException extends Error (abstract `code`)
     │   └── value-object.base.ts
     ├── application/
     │   └── use-case.base.ts
@@ -417,12 +418,14 @@ import { DomainException } from '@/base/lib/domain/domain-exception.base'
 import axios from 'axios'
 
 export class HttpServiceException extends DomainException {
+  readonly code = 'HTTP_SERVICE_ERROR'
+
   constructor(
     public readonly statusCode: number,
-    public readonly message: string,
-    public readonly code?: string,
+    message: string,
+    public readonly downstreamCode?: string,
   ) {
-    super()
+    super(message)
   }
 
   static fromAxiosError(error: unknown): HttpServiceException {
@@ -566,7 +569,7 @@ export class HttpUserRepository implements UserRepository {
     } catch (error) {
       const httpError = error as HttpServiceException
       if (httpError.statusCode === 409) return Result.err(new UserAlreadyExistsException(props.email))
-      return Result.err(new UserAlreadyExistsException(httpError.message))
+      return Result.err(httpError) // HttpServiceException extends DomainException — generic fallback
     }
   }
 }
@@ -760,30 +763,47 @@ export class UserProfilePageMapper {
 
 ## Server Actions Convention {#server-actions}
 
+The Server Action is a **driving boundary** of the frontend hexagon (the Next.js analog of
+the SPA ViewModel for mutations): it unwraps the use case's `Result` and returns a
+serializable error shape.
+
 - Server Actions live in `presentation/screens/<screen>/actions/<action>.action.ts`
 - Marked with `'use server'`
-- Resolve use cases from Awilix container
-- Use `try/catch` — do NOT use Result pattern here
-- When receiving form data, use a **Form Mapper** to convert it into domain Props
+- Resolve use cases from the Awilix container
+- Build use-case inputs as domain **Props classes** (via the Form Mapper for form data) — never object literals
+- **Unwrap point for `Result`**: use cases return `Result<T>` and never throw (adapters already converted every failure). The action checks `isErr()` and maps the `DomainException`'s `code` to a user-facing message. `try/catch` is NOT the error channel — there is nothing to catch.
+- The return value crosses the server/client boundary as plain JSON: return a **serializable** shape (`{ error: string }` / `{ success: true }`) — never the `Result`, the exception, or a domain entity.
+- Only revalidate/redirect on the success path. The Client Component renders the returned `error` (e.g. via `useActionState`).
 
 ```typescript
 // modules/user/presentation/screens/user-profile/actions/create-user.action.ts
 'use server'
 
-import { container } from '@/base/config/di/container'
 import { revalidatePath } from 'next/cache'
+import { container } from '@/base/config/di/container'
+import type { DomainException } from '@/base/lib/domain/domain-exception.base'
 import { CreateUserFormMapper } from '../../mappers/create-user.form-mapper'
 import type { CreateUserFormModel } from '../../models/create-user.form-model'
 
-export async function createUserAction(formData: CreateUserFormModel) {
-  try {
-    const userCreator = container.resolve('userCreator')
-    const props = CreateUserFormMapper.toProps(formData)
-    await userCreator.execute(props)
-    revalidatePath('/users')
-  } catch (error) {
-    return { error: 'Failed to create user' }
-  }
+// Only the codes this action can produce. Swap literals for i18n keys when needed.
+const ERROR_MESSAGES: Record<string, string> = {
+  USER_ALREADY_EXISTS: 'A user with this email already exists',
+}
+
+function toUiError(error: DomainException): string {
+  return ERROR_MESSAGES[error.code] ?? 'Something went wrong, please try again'
+}
+
+export async function createUserAction(
+  formData: CreateUserFormModel,
+): Promise<{ error: string } | { success: true }> {
+  const userCreator = container.resolve('userCreator')
+  const result = await userCreator.execute(CreateUserFormMapper.toProps(formData))
+
+  if (result.isErr()) return { error: toUiError(result.getError()) }
+
+  revalidatePath('/users')
+  return { success: true }
 }
 ```
 
@@ -842,14 +862,26 @@ export default function Page({ params }: { params: { id: string } }) {
 
 ```typescript
 // modules/user/presentation/screens/user-profile/UserProfilePage.tsx
+import { notFound } from 'next/navigation'
 import { container } from '@/base/config/di/container'
+import { FindUserProps } from '../../../domain/props/find-user.props'
 import { UserProfilePageMapper } from '../../mappers/user-profile-page.mapper'
 import { UserProfileClient } from './UserProfileClient'
 
 export async function UserProfilePage({ userId }: { userId: string }) {
   const userFinder = container.resolve('userFinder')
-  const user = await userFinder.execute({ id: userId })
+  const result = await userFinder.execute(new FindUserProps(userId))
 
+  // Server Component unwrap (reads): not-found → 404; anything else throws,
+  // which surfaces the nearest error.tsx at runtime and FAILS THE BUILD on
+  // SSG pages — never render a page from bad data.
+  if (result.isErr()) {
+    const error = result.getError()
+    if (error.code === 'USER_NOT_FOUND') notFound()
+    throw error
+  }
+
+  const user = result.getValue()
   const summary = UserProfilePageMapper.userDomainToUserSummaryModel(user)
   const permissions = UserProfilePageMapper.userDomainToUserPermissionsModel(user)
 
