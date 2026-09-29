@@ -35,7 +35,9 @@ or methods.
 > **The `Result<T>` pattern is the SPA's error channel.** Nothing in `domain/` or
 > `application/` ever throws: failures travel as `Result.err(...)` up to the ViewModel, which
 > is the single unwrap point. If you are porting rules from a NestJS backend, note the
-> difference — the backend throws and maps exceptions in a global filter; the SPA does not.
+> difference — the backend throws and maps exceptions in a global filter; in the SPA the only
+> `throw` is the ViewModel's, inside a Pinia Colada `query` / `mutation` function, and the
+> query engine plays the role of that filter.
 
 The project includes a manual `Result<T>` class in `src/base/lib/domain/result.ts`. The error type is **always `DomainException`** — it is not a generic parameter:
 
@@ -80,8 +82,8 @@ export class Result<T> {
 Rules:
 - Use `Result.ok(value)` and `Result.err(error)` in the **domain** and **application** layers
 - The error side is always `DomainException` — any concrete exception (e.g. `UserNotFoundException`) works because it `extends DomainException`
-- Infrastructure adapters `try/catch` the HTTP client and convert **every** failure into `Result.err(...)` (mapping known statuses to domain exceptions; the `HttpServiceException` itself — it extends `DomainException` — is the generic fallback). Use cases and ViewModels never see exceptions: the **ViewModel** is the frontend's driving boundary — it unwraps the `Result` with `isErr()` and maps the `DomainException`'s `code` to UI error state. It never re-throws, and `try/catch` is not its error channel (see the MVVM Convention in `frontend-spa-vue.md`).
-- In **domain** and **application**, never throw domain errors — always return `Result.err(new UserNotFoundException(id))`. The SPA never throws a `DomainException`.
+- Infrastructure adapters `try/catch` the HTTP client and convert **every** failure into `Result.err(...)` (mapping known statuses to domain exceptions; the `HttpServiceException` itself — it extends `DomainException` — is the generic fallback). Use cases never see exceptions: the **ViewModel** is the frontend's driving boundary — inside its Pinia Colada `query` / `mutation` function it unwraps with `if (result.isErr()) throw result.getError()`, the query engine captures that `DomainException` and exposes it as `error`, and the ViewModel maps its `code` to UI error state. Outside those functions it never throws, and `try/catch` is not its error channel (see the MVVM Convention and *Server State with Pinia Colada* in `frontend-spa-vue.md`).
+- In **domain**, **application** and **infrastructure**, never throw domain errors — always return `Result.err(new UserNotFoundException(id))`. The only `throw` of a `DomainException` in the SPA is the ViewModel's, inside a `query` / `mutation` function.
 
 ## Domain Base Classes
 
@@ -312,8 +314,12 @@ export class UsersFinder extends UseCase<FindUsersProps, Paginated<User>> {
 
 **DI (Awilix):** there is no framework DI container — use cases and adapters are registered in
 the typed Awilix container (`src/base/config/di/container.ts`): a use case under its own name,
-a port under the port's key bound to its adapter (e.g. `userRepository: asClass(HttpUserRepository)`).
-Only ViewModels resolve from the container. See the DI section of `frontend-spa-vue.md`.
+a port under the port's key bound to its adapter (e.g.
+`userRepository: asFunction((cradle: Cradle) => new HttpUserRepository(cradle.httpClient))`).
+Every registration is wired **by hand with `asFunction`** — `asClass` +
+`InjectionMode.CLASSIC` resolves by constructor parameter names and therefore breaks in any
+minified production build. Only ViewModels resolve from the container. See the DI section of
+`frontend-spa-vue.md`.
 
 ## Form Model & Form Mapper Convention
 
@@ -652,8 +658,10 @@ describe('HttpUserRepository', () => {
 
 **4. ViewModel** — see *Testing the ViewModel* in the MVVM Convention of
 `frontend-spa-vue.md`. The pattern is always: override the container registrations with
-`asValue(mock)`, run the composable, and assert **only on what the ViewModel returns** (the
-View's contract) — never on internals, and never mocking axios directly.
+`asValue(mock)`, run the composable through the `withSetup` helper (a fresh app with Pinia and
+Pinia Colada per test, so the cache starts empty), `await flushPromises()`, and assert **only
+on what the ViewModel returns** (the View's contract) — never on internals or the cache, and
+never mocking axios or `@pinia/colada` directly.
 
 ## Code Quality
 
@@ -678,7 +686,7 @@ The project has a `src/base/` folder with technical cross-cutting concerns:
 
 ```
 src/base/
-├── config/          ← technical infrastructure (env, http, auth, logger, di, etc.)
+├── config/          ← technical infrastructure (env, http, auth, logger, di, colada, etc.)
 ├── constants/
 │   └── index.ts     ← project-wide constants (export const VARIABLE_NAME = value)
 └── lib/             ← abstract base classes & generic technical machinery

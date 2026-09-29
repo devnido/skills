@@ -2,13 +2,14 @@
 name: vuejs-hexagonal
 description: >
   Enforces hexagonal architecture (Ports & Adapters) with vertical slicing and MVVM in
-  Vue.js SPAs (Vue 3 + Vue Router + Pinia + Vite + Awilix). Use this skill whenever the
+  Vue.js SPAs (Vue 3 + Vue Router + Pinia + Pinia Colada + Vite + Awilix). Use this skill whenever the
   user creates a Vue project, adds a module or feature, scaffolds a use case, creates a
   repository/adapter, adds a screen, component, composable, ViewModel, store, route or
   layout, or does anything involving file/folder structure in a Vue codebase. Also
   trigger when the user asks about architecture, folder structure, naming conventions,
   MVVM, ViewModels, screen/form mappers, presentation models, DI with Awilix, the Result
-  pattern, or where to place a file in a Vue app — including phrases like "arquitectura
+  pattern, server state with Pinia Colada (useQuery, useMutation, query keys, cache
+  invalidation), or where to place a file in a Vue app — including phrases like "arquitectura
   hexagonal en Vue", "crear un módulo Vue", "nuevo caso de uso en el front", "dónde va
   este archivo", "cómo estructuro el proyecto Vue", "agregar una pantalla", "crear un
   ViewModel", "add a Vue module", "scaffold a Vue feature", "new screen", "vue hexagonal".
@@ -36,27 +37,11 @@ generating any file or folder, read BOTH reference files:**
 
 | Applies to | Does NOT apply to |
 |---|---|
-| Vue 3 SPA (Composition API) + Vue Router + Pinia, built with Vite | NestJS, React SPA, React Native, Next.js → use the `hexagonal-architecture` skill |
+| Vue 3 SPA (Composition API) + Vue Router + Pinia + Pinia Colada, built with Vite | NestJS, React SPA, React Native, Next.js → use the `hexagonal-architecture` skill |
 
 Confirm the project is a Vue SPA from `package.json` (`vue`, `vue-router`, `vite`) or the
 existing structure. **If you cannot determine the project type, ask the user before
 generating anything.** Never guess.
-
-### Monorepos (multiple projects in one repo)
-
-- The **nearest `package.json`** walking up from the file you are touching defines the
-  project and its type. A root `package.json` with `workspaces` (or `pnpm-workspace.yaml`,
-  `turbo.json`, `nx.json`) is **not a project** — it is orchestration; never detect the
-  type from it.
-- Every path in this skill (`src/`, `tests/`, `.env.example`, ESLint config) is relative
-  to **that project's root**, never the repo root.
-- **Each project is its own hexagon.** Never import code from a sibling project — the SPA
-  talks to other services only through their public contracts (the REST API). The
-  duplication of `src/base/` across sibling projects is **deliberate**; do not
-  "deduplicate" it into a workspace package — extracting a shared package is an explicit
-  user decision, never the agent's initiative.
-- If the change belongs to a non-Vue sibling project, stop and use the
-  `hexagonal-architecture` skill for that project instead.
 
 ---
 
@@ -129,8 +114,10 @@ Summary of the non-negotiables:
   (`Result.ok` / `Result.err`, error side always a `DomainException` subclass) and **never
   throw**. Adapters `try/catch` the HTTP client and convert **every** failure into
   `Result.err` (mapping known statuses to domain exceptions; `HttpServiceException` is the
-  generic fallback). The **ViewModel** unwraps the `Result` with `isErr()` and maps the
-  error `code` to UI state — it never throws and `try/catch` is not its error channel.
+  generic fallback). The **ViewModel** unwraps the `Result` inside its Pinia Colada
+  `query` / `mutation` function with `if (result.isErr()) throw result.getError()` — the
+  **only `throw` in the SPA** — and maps the captured error `code` to UI state; outside
+  those functions it never throws and `try/catch` is not its error channel.
 - **Domain base classes** (`src/base/lib/domain/`) — `Command`, `Query`, `Props` (made
   nominal via a private `_brand` field) and `DomainException extends Error` (abstract
   stable `code`, message via `super`). Every input and error extends its base. Generate
@@ -168,17 +155,35 @@ Summary of the non-negotiables:
 - **MVVM (mandatory)** — the Screen (View) is passive: it consumes only its ViewModel's
   return and never imports `domain/` / `application/`, the DI container, stores, or
   mappers. The ViewModel (`use<Screen>ViewModel`) receives route params as arguments,
-  self-initializes (`onMounted` inside the ViewModel), resolves use cases from the Awilix
-  container once at the top, builds Props classes, unwraps the `Result`, and returns
-  **only** Presentation Models + UI state (`isLoading`, `error`) + action functions.
+  self-initializes (its `useQuery` runs on its own — no `onMounted` to fetch), resolves use
+  cases from the Awilix container once at the top, builds Props classes, unwraps the
+  `Result`, and returns **only** Presentation Models + UI state (`isLoading`, `error` as
+  `string | null`) + action functions — never the query/mutation objects.
+- **Server state with Pinia Colada (confined to ViewModels)** — reads use `useQuery`,
+  writes use `useMutation` and invalidate the keys they changed
+  (`useQueryCache().invalidateQueries`). Only ViewModels import `@pinia/colada` (plus
+  `main.ts`, `src/base/config/colada/` and the ViewModel test helper). The cache stores
+  **domain data**; the ViewModel maps it to Presentation Models with `computed` + the Screen
+  Mapper. Keys are `[module, action, ...params]` (a getter when a param is reactive).
+  Technical policy (`staleTime`) lives in `src/base/config/colada/colada.options.ts`.
 - **DI with Awilix** — the typed container lives in `src/base/config/di/container.ts`
   (there is no framework-level DI). Ports are registered bound to their adapter; only
-  ViewModels resolve from the container.
-- **Pinia store** — holds **cross-screen** state only. ViewModels read/write it; Views
-  never import it. Tokens never live in the store.
+  ViewModels resolve from the container. **Wire every registration by hand with
+  `asFunction((cradle) => new Foo(cradle.bar))` — never `asClass` + `InjectionMode.CLASSIC`,
+  which resolves by constructor parameter names and breaks in every minified production
+  build** (`Could not resolve 'e'`), while passing dev forever.
+- **Use case constructors** — a use case `extends UseCase`, so any constructor it declares
+  **must call `super()`**; omitting it is a compile error (TS2377).
+- **Module routes** — `*.routes.ts` exports a `RouteRecordRaw[]` (an **array**, even for a
+  single route); the router composes modules with a spread, so exporting a bare object
+  fails at runtime with `is not iterable`.
+- **Pinia store** — holds **cross-screen client state** only (session, remembered
+  filters); server data lives in the Pinia Colada cache, never copied into a store.
+  ViewModels read/write it; Views never import it. Tokens never live in the store.
 - **Testing** — domain: pure unit tests; application: unit tests with mocked ports;
   infrastructure: unit tests with a mocked HTTP client; presentation: ViewModel tests
-  (override container registrations with `asValue(mock)`) and component tests with
+  (override container registrations with `asValue(mock)`, run through a `withSetup` helper
+  that installs a fresh Pinia + Pinia Colada per test) and component tests with
   `@vue/test-utils`. Tests live in `tests/` mirroring `src/`. **Generate tests from the
   canonical templates** in the reference — mock only at the port / use-case seam; entity
   fixtures come from builders in `tests/modules/<module>/builders/`.
@@ -214,8 +219,9 @@ Summary of the non-negotiables:
 4. **Scaffold** using the verified CLI command (TypeScript, Vue Router, Pinia, ESLint,
    Prettier).
 5. **Install dependencies** listed in the Vue reference (Tailwind, Axios, Awilix, zod,
-   Vitest, `@vue/test-utils`, `eslint-plugin-boundaries`, husky, lint-staged).
-6. **Create `src/base/`** with `config/` and `lib/` as described in the references.
+   Pinia Colada, Vitest, `@vue/test-utils`, `eslint-plugin-boundaries`, husky, lint-staged).
+6. **Create `src/base/`** with `config/` and `lib/` as described in the references, and
+   install Pinia Colada in `main.ts` with the options from `src/base/config/colada/`.
 7. **Configure boundary enforcement** (ESLint) and the Husky + lint-staged hooks.
 8. **Create the first module** (if the user specified a domain) following the folder
    structure and the 4 layers.
@@ -229,7 +235,8 @@ Summary of the non-negotiables:
 3. **Create the module folder** inside `src/modules/<domain>/` with its 4 layers.
 4. **Generate files** following the naming conventions (class names *and* file suffixes).
 5. **Respect the dependency rule** — `domain/` imports nothing from outer layers.
-6. **Apply MVVM** — every new screen gets a ViewModel; the View stays passive.
+6. **Apply MVVM** — every new screen gets a ViewModel; the View stays passive; server
+   data goes through Pinia Colada inside the ViewModel.
 7. **Register in DI** — add the port/adapter and the use case to the Awilix container.
 8. **Add routes** to the module's `*.routes.ts` and register them in the router.
 9. **Generate tests** in `tests/` mirroring `src/`: `src/.../foo.ts` →
@@ -247,8 +254,9 @@ Do not skip steps 6-9 unless the user explicitly says so.
 
 ## Related Skills
 
-- `hexagonal-architecture` — the multi-stack version (NestJS, React, React Native,
-  Next.js, and Vue). Use it when the task is **not** a Vue SPA.
+- `hexagonal-architecture` — the same architecture for NestJS, React SPA, React Native
+  and Next.js. It does **not** cover Vue: this skill is the only source for Vue SPAs. Use
+  it when the task is **not** a Vue SPA.
 - `criteria-pattern` — dynamic filters + order + pagination behind a single
   `matching(criteria)` repository method.
 

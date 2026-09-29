@@ -32,6 +32,7 @@ npm install awilix           # dependency injection
 npm install zod              # env and DTO validation
 npm install axios            # HTTP client
 npm install @vueuse/core     # essential composables (useStorage, useDebounceFn, etc.)
+npm install @pinia/colada    # server state (queries + mutations cache) — imported only by ViewModels
 
 # Tailwind CSS
 npm install -D tailwindcss @tailwindcss/vite
@@ -49,6 +50,8 @@ npx husky init
 1. Create `src/base/` structure with config and lib folders
 2. Create `src/modules/shared/` and first domain module
 3. Set up Awilix container in `src/base/config/di/container.ts`
+3b. Set up the Pinia Colada options in `src/base/config/colada/colada.options.ts` and install
+   the plugin in `main.ts` (see [Server State with Pinia Colada](#colada))
 4. Set up env validation with zod in `src/base/config/env/`
 5. Configure path alias `@/` → `src/` in `tsconfig.json` and `vite.config.ts`
 6. Configure Tailwind CSS in `vite.config.ts` and add `@import "tailwindcss"` to main CSS
@@ -283,6 +286,8 @@ src/base/
 │   │   └── logger.ts
 │   ├── di/
 │   │   └── container.ts           ← Awilix container setup
+│   ├── colada/
+│   │   └── colada.options.ts      ← Pinia Colada technical policy (staleTime, …)
 │   └── router/
 │       └── index.ts               ← createRouter, imports module routes
 ├── constants/
@@ -309,11 +314,14 @@ import './base/config/env/env.config'   // validate env vars first
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import { PiniaColada } from '@pinia/colada'
 import App from './App.vue'
 import router from './base/config/router'
+import { coladaOptions } from './base/config/colada/colada.options'
 
 const app = createApp(App)
-app.use(createPinia())
+app.use(createPinia())                  // Pinia first: Pinia Colada stores its cache in it
+app.use(PiniaColada, coladaOptions)
 app.use(router)
 app.mount('#app')
 ```
@@ -560,15 +568,19 @@ export class AxiosHttpClient {
 ### DI Registration
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, InjectionMode } from 'awilix'
+import { createContainer, asFunction } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
 
-export const container = createContainer({ injectionMode: InjectionMode.CLASSIC })
+// `Cradle` is the typed registration map — declared in the full container below.
+export const container = createContainer<Cradle>()
 
 container.register({
-  httpClient: asClass(AxiosHttpClient).singleton(),
+  httpClient: asFunction(() => new AxiosHttpClient()).singleton(),
 })
 ```
+
+See [DI with Awilix](#di) for the full container and for **why every dependency is wired
+by hand with `asFunction` instead of `asClass` + `InjectionMode.CLASSIC`.**
 
 ### Adapter Usage
 ```typescript
@@ -631,9 +643,22 @@ modules/user/presentation/
 
 ## DI with Awilix {#di}
 
+> **Never use `asClass` with `InjectionMode.CLASSIC` — it breaks in production.** CLASSIC
+> injection resolves dependencies by reading the **constructor parameter names**, which only
+> survive in unminified code. In a production build the minifier renames `userRepository` to
+> `e`, Awilix then looks for a registration called `e`, and every screen dies with
+> `Could not resolve 'e'. Resolution path: userCreator -> e`. It passes dev forever, because
+> dev is never minified.
+>
+> Wire every dependency **by hand with `asFunction`**, reading it off the cradle. A property
+> access survives any build (minifiers do not rename properties), and it is also the better
+> hexagon: the composition root is the single place that knows the object graph, TypeScript
+> checks each `new` against the real constructor, and the classes keep honest typed
+> parameters instead of a magic cradle argument.
+
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, InjectionMode } from 'awilix'
+import { createContainer, asFunction } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
 import type { UserRepository } from '@/modules/user/domain/ports/user.repository'
 import { HttpUserRepository } from '@/modules/user/infrastructure/repositories/http-user.repository'
@@ -649,20 +674,31 @@ export interface Cradle {
   userFinder: UserFinder
 }
 
-export const container = createContainer<Cradle>({ injectionMode: InjectionMode.CLASSIC })
+export const container = createContainer<Cradle>()
 
 container.register({
   // Base infrastructure
-  httpClient: asClass(AxiosHttpClient).singleton(),
+  httpClient: asFunction(() => new AxiosHttpClient()).singleton(),
 
-  // Adapters (receive httpClient via constructor injection)
-  userRepository: asClass(HttpUserRepository).singleton(),
+  // Adapters (the port key is bound to its adapter here)
+  userRepository: asFunction(
+    (cradle: Cradle) => new HttpUserRepository(cradle.httpClient),
+  ).singleton(),
 
-  // Use cases (receive adapters via constructor injection)
-  userCreator: asClass(UserCreator).singleton(),
-  userFinder: asClass(UserFinder).singleton(),
+  // Use cases (receive the port, never the concrete adapter)
+  userCreator: asFunction((cradle: Cradle) => new UserCreator(cradle.userRepository)).singleton(),
+  userFinder: asFunction((cradle: Cradle) => new UserFinder(cradle.userRepository)).singleton(),
 })
 ```
+
+Rules:
+- `createContainer<Cradle>()` — no `injectionMode`. The default (`PROXY`) is irrelevant here
+  because nothing is registered with `asClass`.
+- One `asFunction` per registration, `.singleton()` in all three cases (the graph is stateless).
+- Adapters are registered **under the port's key** (`userRepository`), never under the
+  adapter's name — swapping `HttpUserRepository` for another adapter is a one-line change.
+- Only ViewModels call `container.resolve(...)`. Tests override a registration with
+  `asValue(mock)` (see *Testing the ViewModel*).
 
 ---
 
@@ -692,7 +728,9 @@ import { UseCase } from '@/base/lib/application/use-case.base'
 import { CreateUserProps } from '../../domain/props/create-user.props'
 
 export class UserCreator extends UseCase<CreateUserProps, User> {
-  constructor(private readonly userRepository: UserRepository) {}
+  constructor(private readonly userRepository: UserRepository) {
+    super() // mandatory: `UseCase` is a base class, so a derived constructor must call it
+  }
 
   async execute(props: CreateUserProps): Promise<Result<User>> {
     // ...
@@ -798,7 +836,7 @@ export class UserProfileScreenMapper {
 ## MVVM Convention {#mvvm}
 
 The presentation layer follows **MVVM**:
-- **Model** — the Presentation Models / Form Models built by the screen's mappers, plus the module store for cross-screen state.
+- **Model** — the Presentation Models / Form Models built by the screen's mappers, the Pinia Colada cache for server state (domain data fetched through use cases), and the module store for cross-screen client state.
 - **View** — the Screen component (`.vue` SFC). Passive: it renders state and forwards user intent to the ViewModel.
 - **ViewModel** — the `use<Screen>ViewModel` composable. Owns UI state and orchestration; it is the **driving boundary** of the frontend hexagon (the SPA analog of a backend controller).
 
@@ -808,13 +846,14 @@ The presentation layer follows **MVVM**:
 ### ViewModel rules
 
 - Named `use<Screen>ViewModel.ts`, lives alongside its screen. One ViewModel per screen — reusable logic goes to `composables/`, and a reusable composable must not call use cases.
-- Receives route params as **function arguments** and self-initializes (`onMounted` inside the ViewModel) — the View never orchestrates loading.
+- Receives route params as **function arguments** and self-initializes: server data is read with `useQuery`, which runs on its own when the screen mounts — the View never orchestrates loading, and no `onMounted` is needed to fetch.
 - Resolves use cases from the typed Awilix container **once, at the top** of the composable.
 - Builds use-case inputs as domain **Props classes** (via the Form Mapper for forms) — never object literals.
-- **Unwrap point for `Result`**: use cases return `Result<T>` and never throw (adapters already converted every failure). The ViewModel checks `isErr()` and maps the `DomainException`'s `code` to a user-facing message. `try/catch` is NOT the error channel here — there is nothing to catch.
-- Converts domain entities to Presentation Models via the Screen Mapper before exposing them.
-- Returns **only**: reactive refs with Presentation Models, primitive UI state (`isLoading`, `error`), and action functions. Never domain entities, `Result`s, exceptions, or the container.
-- The module store (Pinia) holds **cross-screen** state only; ViewModels read/write it, Views never import it.
+- **Server state goes through Pinia Colada**: reads with `useQuery`, writes with `useMutation` (see [Server State with Pinia Colada](#colada)). The ViewModel is the only file that imports `@pinia/colada`.
+- **Unwrap point for `Result`**: use cases return `Result<T>` and never throw (adapters already converted every failure). Inside the `query` / `mutation` function the ViewModel unwraps with `if (result.isErr()) throw result.getError()` — **the only `throw` in the whole SPA** — and the query engine captures it and exposes it as `error`. The ViewModel then maps that `DomainException`'s `code` to a user-facing message. Outside those functions it never throws, and `try/catch` is NOT its error channel.
+- Converts domain data to Presentation Models via the Screen Mapper, with `computed` over the query's `data` — the cache keeps domain data, never Presentation Models.
+- Returns **only**: reactive refs / computeds with Presentation Models, primitive UI state (`isLoading`, `error` as `string | null`), and action functions. Never domain entities, `Result`s, exceptions, query/mutation objects, or the container.
+- The module store (Pinia) holds **cross-screen client state** only (e.g. the logged-in session, a remembered filter); server data lives in the Pinia Colada cache, never copied into a store. ViewModels read/write the store, Views never import it.
 
 ### View (Screen) rules
 
@@ -826,12 +865,14 @@ The presentation layer follows **MVVM**:
 
 ```typescript
 // useUserProfileViewModel.ts
-import { onMounted, ref } from 'vue'
+// The only file of this screen that knows @pinia/colada exists: it is the driving boundary
+// of the hexagon — it unwraps the use case's Result, throws into the query engine, and
+// exposes only presentation data.
+import { computed } from 'vue'
+import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
 import { container } from '@/base/config/di/container'
 import type { DomainException } from '@/base/lib/domain/domain-exception.base'
 import { FindUserProps } from '../../../domain/props/find-user.props'
-import type { UserSummaryModel } from '../../models/user-summary.model'
-import type { UserPermissionsModel } from '../../models/user-permissions.model'
 import type { CreateUserFormModel } from '../../models/create-user.form-model'
 import { UserProfileScreenMapper } from '../../mappers/user-profile-screen.mapper'
 import { CreateUserFormMapper } from '../../mappers/create-user.form-mapper'
@@ -849,37 +890,55 @@ function toUiError(error: DomainException): string {
 export function useUserProfileViewModel(userId: string) {
   const userFinder = container.resolve('userFinder')
   const userCreator = container.resolve('userCreator')
+  const queryCache = useQueryCache()
 
-  const summary = ref<UserSummaryModel | null>(null)
-  const permissions = ref<UserPermissionsModel | null>(null)
-  const isLoading = ref(false)
-  const error = ref<string | null>(null)
+  // Read: key = [module, action, ...params]
+  const userQuery = useQuery({
+    key: ['user', 'detail', userId],
+    query: async () => {
+      const result = await userFinder.execute(new FindUserProps(userId))
+      if (result.isErr()) throw result.getError() // driving boundary: the only throw
+      return result.getValue() // User — the cache stores domain data
+    },
+  })
 
-  onMounted(() => loadUser(userId))
+  // Write: invalidate the module's queries so every screen showing users refetches
+  const createUserMutation = useMutation({
+    mutation: async (formData: CreateUserFormModel) => {
+      const result = await userCreator.execute(CreateUserFormMapper.toProps(formData))
+      if (result.isErr()) throw result.getError()
+      return result.getValue()
+    },
+    onSuccess: () => queryCache.invalidateQueries({ key: ['user'] }),
+  })
 
-  async function loadUser(id: string) {
-    isLoading.value = true
-    error.value = null
-    const result = await userFinder.execute(new FindUserProps(id))
-    if (result.isErr()) {
-      error.value = toUiError(result.getError())
-    } else {
-      const user = result.getValue()
-      summary.value = UserProfileScreenMapper.userDomainToUserSummaryModel(user)
-      permissions.value = UserProfileScreenMapper.userDomainToUserPermissionsModel(user)
-    }
-    isLoading.value = false
+  const summary = computed(() =>
+    userQuery.data.value
+      ? UserProfileScreenMapper.userDomainToUserSummaryModel(userQuery.data.value)
+      : null,
+  )
+  const permissions = computed(() =>
+    userQuery.data.value
+      ? UserProfileScreenMapper.userDomainToUserPermissionsModel(userQuery.data.value)
+      : null,
+  )
+  const error = computed(() => {
+    const failure = userQuery.error.value ?? createUserMutation.error.value
+    return failure ? toUiError(failure as DomainException) : null
+  })
+
+  function createUser(formData: CreateUserFormModel) {
+    createUserMutation.mutate(formData)
   }
 
-  async function createUser(formData: CreateUserFormModel) {
-    isLoading.value = true
-    error.value = null
-    const result = await userCreator.execute(CreateUserFormMapper.toProps(formData))
-    if (result.isErr()) error.value = toUiError(result.getError())
-    isLoading.value = false
+  return {
+    summary,
+    permissions,
+    isLoading: userQuery.isPending,
+    isSaving: createUserMutation.isLoading,
+    error,
+    createUser,
   }
-
-  return { summary, permissions, isLoading, error, createUser }
 }
 ```
 
@@ -907,16 +966,122 @@ const { summary, permissions, isLoading, error } =
 </template>
 ```
 
+### Server State with Pinia Colada {#colada}
+
+Server state — the domain data a screen reads through a use case, and the writes that
+change it — is cached and tracked by **Pinia Colada** (`@pinia/colada`). The library is
+**confined to the ViewModels**: the View, `domain/`, `application/` and
+`infrastructure/` never know it exists, so the hexagon stays framework-agnostic and a
+use case is still a plain class returning `Result<T>`.
+
+Contract:
+
+1. **Only ViewModels import `@pinia/colada`** — plus `main.ts`, which installs the
+   plugin, `src/base/config/colada/`, which holds its options, and the ViewModel test
+   helper. Verify it with a search: every other hit is a violation.
+   ```bash
+   grep -rl "@pinia/colada" src/ tests/
+   ```
+2. **The `query` / `mutation` function is the only place in the SPA that throws.** It calls
+   the use case and unwraps with `if (result.isErr()) throw result.getError()`. That is
+   the driving boundary — the query engine plays the role a global exception filter plays
+   in a backend: it catches the `DomainException` and exposes it as `error`.
+3. **The cache stores domain data** (`User`, `Paginated<User>`), never Presentation
+   Models. The ViewModel maps it with `computed` + the Screen Mapper, so two screens can
+   share one cached entry and render it differently.
+4. **The View receives `error` as `string | null`** — the ViewModel maps
+   `DomainException.code` to a message (`toUiError`). The View never sees the exception,
+   the `Result`, or the query/mutation object.
+5. **Keys are `[module, action, ...params]`** — `['user', 'list', page]`,
+   `['user', 'detail', userId]`. The module prefix keeps modules from colliding in the one
+   shared cache and lets a mutation invalidate a whole module (`{ key: ['user'] }`). When a
+   param is reactive (a page, a filter), pass the key as a getter so the query refetches
+   when it changes: `key: () => ['user', 'list', page.value]`.
+6. **Writes use `useMutation`** and, on success, invalidate the keys whose data they
+   changed (`useQueryCache().invalidateQueries({ key: [...] })`). Never patch the cache by
+   hand with data the use case did not return.
+7. **Technical policy is centralized** in `src/base/config/colada/colada.options.ts`
+   (`staleTime`, and any other default). A query overrides it only with a stated reason,
+   written as a comment next to the override.
+
+```typescript
+// src/base/config/colada/colada.options.ts
+import type { PiniaColadaOptions } from '@pinia/colada'
+
+// Technical caching policy: a query stays fresh for 1 minute, so revisiting a cached
+// screen within that window renders instantly without refetching.
+export const coladaOptions: PiniaColadaOptions = {
+  queryOptions: {
+    staleTime: 60_000,
+  },
+}
+```
+
+A paginated list keeps the page as local UI state and derives everything else:
+
+```typescript
+// useUsersListViewModel.ts
+import { computed, ref } from 'vue'
+import { useQuery } from '@pinia/colada'
+import { container } from '@/base/config/di/container'
+import type { DomainException } from '@/base/lib/domain/domain-exception.base'
+import { DEFAULT_PAGE_SIZE } from '@/base/constants'
+import { FindUsersProps } from '../../../domain/props/find-users.props'
+import { UsersListScreenMapper } from '../../mappers/users-list-screen.mapper'
+
+const ERROR_MESSAGES: Record<string, string> = {
+  HTTP_SERVICE_ERROR: 'The service is unreachable right now, please try again',
+}
+
+function toUiError(error: DomainException): string {
+  return ERROR_MESSAGES[error.code] ?? 'Something went wrong, please try again'
+}
+
+export function useUsersListViewModel() {
+  const usersFinder = container.resolve('usersFinder')
+  const page = ref(1)
+
+  const { data, error, isPending } = useQuery({
+    key: () => ['user', 'list', page.value],
+    query: async () => {
+      const result = await usersFinder.execute(new FindUsersProps(page.value, DEFAULT_PAGE_SIZE))
+      if (result.isErr()) throw result.getError()
+      return result.getValue() // Paginated<User>
+    },
+  })
+
+  const rows = computed(() =>
+    (data.value?.items ?? []).map(UsersListScreenMapper.userDomainToUserRowModel),
+  )
+  const totalPages = computed(() => (data.value ? Math.ceil(data.value.total / data.value.limit) : 0))
+  const uiError = computed(() => (error.value ? toUiError(error.value as DomainException) : null))
+
+  function nextPage() {
+    if (totalPages.value === 0 || page.value < totalPages.value) page.value += 1
+  }
+
+  function prevPage() {
+    if (page.value > 1) page.value -= 1
+  }
+
+  return { rows, page, totalPages, isLoading: isPending, error: uiError, nextPage, prevPage }
+}
+```
+
 ### Testing the ViewModel
 
-The composable uses `onMounted`, so it must run inside a component context. Use a tiny
-`withSetup` helper, mock at the **use-case seam** by overriding the container
-registrations with `asValue`, and assert only on what the ViewModel returns (the View's
-contract) — never on internals, and never mocking axios/fetch:
+The composable uses Pinia Colada, so it must run inside a component context with a live
+Pinia and the Pinia Colada plugin installed. Use a tiny `withSetup` helper that creates a
+fresh app — and therefore a fresh, empty cache — per test, mock at the **use-case seam** by
+overriding the container registrations with `asValue`, and assert only on what the
+ViewModel returns (the View's contract) — never on internals, never on the cache, and never
+mocking axios/fetch or `@pinia/colada` itself:
 
 ```typescript
 // tests/helpers/with-setup.ts
 import { createApp, type App } from 'vue'
+import { createPinia } from 'pinia'
+import { PiniaColada } from '@pinia/colada'
 
 export function withSetup<T>(composable: () => T): { result: T; app: App } {
   let result!: T
@@ -926,6 +1091,9 @@ export function withSetup<T>(composable: () => T): { result: T; app: App } {
       return () => null
     },
   })
+  // A new app per test = a new Pinia and a new, empty Pinia Colada cache.
+  app.use(createPinia())
+  app.use(PiniaColada)
   app.mount(document.createElement('div'))
   return { result, app }
 }
@@ -977,23 +1145,30 @@ it('maps the DomainException code to a UI message on failure', async () => {
 
 ## Router Convention {#router}
 
-Each module exports its own routes:
+Each module exports its own routes as an **array** (`RouteRecordRaw[]`) — the router
+composes them with a spread (`...userRoutes`), so a single object would blow up at
+runtime with `userRoutes is not iterable`:
 
 ```typescript
 // modules/user/presentation/routes/user.routes.ts
 import type { RouteRecordRaw } from 'vue-router'
 
-export const userRoutes: RouteRecordRaw = {
-  path: '/users',
-  children: [
-    {
-      path: 'profile',
-      name: 'user-profile',
-      component: () => import('../screens/user-profile/UserProfileScreen.vue'),
-    },
-  ],
-}
+export const userRoutes: RouteRecordRaw[] = [
+  {
+    path: '/users/profile',
+    name: 'user-profile',
+    component: () => import('../screens/user-profile/UserProfileScreen.vue'),
+  },
+  {
+    path: '/users/:id',
+    name: 'user-detail',
+    component: () => import('../screens/user-detail/UserDetailScreen.vue'),
+  },
+]
 ```
+
+A module that really needs nested routes still exports an array — with one parent record
+carrying its `children`.
 
 ---
 

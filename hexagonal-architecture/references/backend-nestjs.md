@@ -1216,7 +1216,9 @@ import { type UserCreatorOutput } from "./user-creator.output";
 export class UserCreator extends UseCase<CreateUserCommand, UserCreatorOutput> {
   constructor(
     @Inject(USER_REPOSITORY) private readonly userRepository: UserRepository,
-  ) {}
+  ) {
+    super(); // mandatory: `UseCase` is a base class, so a derived constructor must call it
+  }
 
   async execute(command: CreateUserCommand): Promise<UserCreatorOutput> {
     // The port throws (e.g. UserAlreadyExistsException) on the error path; let it

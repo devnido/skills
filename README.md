@@ -7,7 +7,8 @@ Colección de [Agent Skills](https://docs.anthropic.com/en/docs/claude-code/skil
 | Skill | Descripción |
 |---|---|
 | [create-skill](./create-skill/) | Crea y actualiza skills de Claude Code de forma consistente (scaffold, symlink, espejo en español). |
-| [hexagonal-architecture](./hexagonal-architecture/) | Impone arquitectura hexagonal (Ports & Adapters) con vertical slicing en proyectos TypeScript: NestJS, Vue, React, React Native y Next.js. |
+| [hexagonal-architecture](./hexagonal-architecture/) | Impone arquitectura hexagonal (Ports & Adapters) con vertical slicing en proyectos TypeScript: NestJS, React, React Native y Next.js. |
+| [vuejs-hexagonal](./vuejs-hexagonal/) | Impone arquitectura hexagonal con vertical slicing y MVVM en SPAs de Vue 3, con el estado de servidor en Pinia Colada confinado a los ViewModels. |
 | [criteria-pattern](./criteria-pattern/) | Aplica el patrón Criteria (CodelyTV) para búsquedas dinámicas con filtros, orden y paginación en microservicios DDD/hexagonal. |
 
 ## Estructura de cada skill

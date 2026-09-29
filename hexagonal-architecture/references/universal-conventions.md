@@ -1,7 +1,7 @@
 # Universal Conventions — Hexagonal Architecture
 
-These conventions apply to **ALL project types** (NestJS monolith/microservice, Vue SPA,
-React SPA, React Native, Next.js). Read this file together with the project-type reference
+These conventions apply to **ALL project types** (NestJS monolith/microservice, React SPA,
+React Native, Next.js; Vue SPAs are covered by the `vuejs-hexagonal` skill). Read this file together with the project-type reference
 before generating any structure. `SKILL.md` carries only a digest of these rules — **this
 file is the canonical source for the full rules and the code templates.** Generate every
 template below exactly as shown — do not rename classes, generics, or methods.
@@ -724,7 +724,7 @@ export interface TokenStorage {
 
 | Platform | Adapter | Storage |
 |---|---|---|
-| Vue / React SPA | `local-storage.token-storage.ts` | `localStorage` (accepted XSS trade-off; prefer in-memory access token + refresh cookie if the API supports it) |
+| React SPA | `local-storage.token-storage.ts` | `localStorage` (accepted XSS trade-off; prefer in-memory access token + refresh cookie if the API supports it) |
 | React Native | `secure-store.token-storage.ts` | `expo-secure-store` |
 | Next.js | — (no client adapter) | **httpOnly cookies** set by a Server Action / Route Handler; middleware reads them (see the Next.js reference) |
 
@@ -803,7 +803,6 @@ Testing frameworks per project type:
 | Project | Framework | Component Testing |
 |---|---|---|
 | NestJS | Jest (included with NestJS) | — |
-| Vue.js | Vitest | `@vue/test-utils` |
 | React SPA | Vitest | `@testing-library/react` |
 | React Native | Jest (included with Expo) | `@testing-library/react-native` |
 | Next.js | Vitest | `@testing-library/react` |
@@ -1017,7 +1016,7 @@ Every project follows these rules for environment variables:
 
 **Variable prefix by project type** (enforced by the platform, not optional):
 - **NestJS backend**: no prefix — accessed via `process.env.VAR_NAME`, read through `EnvVarsService`
-- **Vite (Vue, React)**: `VITE_` prefix — only `VITE_*` variables are exposed to the browser via `import.meta.env`
+- **Vite (React)**: `VITE_` prefix — only `VITE_*` variables are exposed to the browser via `import.meta.env`
 - **Next.js**: `NEXT_PUBLIC_` prefix for client-accessible variables; no prefix for server-only variables
 - **Expo (React Native)**: `EXPO_PUBLIC_` prefix — only `EXPO_PUBLIC_*` variables are bundled into the app
 

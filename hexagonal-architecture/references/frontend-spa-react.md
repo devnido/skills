@@ -548,15 +548,19 @@ export class AxiosHttpClient {
 ### DI Registration
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, InjectionMode } from 'awilix'
+import { createContainer, asFunction } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
 
-export const container = createContainer({ injectionMode: InjectionMode.CLASSIC })
+// `Cradle` is the typed registration map — declared in the full container below.
+export const container = createContainer<Cradle>()
 
 container.register({
-  httpClient: asClass(AxiosHttpClient).singleton(),
+  httpClient: asFunction(() => new AxiosHttpClient()).singleton(),
 })
 ```
+
+See the DI section below for the full container and for **why every dependency is wired
+by hand with `asFunction` instead of `asClass` + `InjectionMode.CLASSIC`.**
 
 ### Adapter Usage
 ```typescript
@@ -619,9 +623,22 @@ modules/user/presentation/
 
 ## DI with Awilix {#di}
 
+> **Never use `asClass` with `InjectionMode.CLASSIC` — it breaks in production.** CLASSIC
+> injection resolves dependencies by reading the **constructor parameter names**, which only
+> survive in unminified code. In a production build the minifier renames `userRepository` to
+> `e`, Awilix then looks for a registration called `e`, and every screen dies with
+> `Could not resolve 'e'. Resolution path: userCreator -> e`. It passes dev forever, because
+> dev is never minified.
+>
+> Wire every dependency **by hand with `asFunction`**, reading it off the cradle. A property
+> access survives any build (minifiers do not rename properties), and it is also the better
+> hexagon: the composition root is the single place that knows the object graph, TypeScript
+> checks each `new` against the real constructor, and the classes keep honest typed
+> parameters instead of a magic cradle argument.
+
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, InjectionMode } from 'awilix'
+import { createContainer, asFunction } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
 import type { UserRepository } from '@/modules/user/domain/ports/user.repository'
 import { HttpUserRepository } from '@/modules/user/infrastructure/repositories/http-user.repository'
@@ -637,20 +654,29 @@ export interface Cradle {
   userFinder: UserFinder
 }
 
-export const container = createContainer<Cradle>({ injectionMode: InjectionMode.CLASSIC })
+export const container = createContainer<Cradle>()
 
 container.register({
   // Base infrastructure
-  httpClient: asClass(AxiosHttpClient).singleton(),
+  httpClient: asFunction(() => new AxiosHttpClient()).singleton(),
 
-  // Adapters (receive httpClient via constructor injection)
-  userRepository: asClass(HttpUserRepository).singleton(),
+  // Adapters (the port key is bound to its adapter here)
+  userRepository: asFunction(
+    (cradle: Cradle) => new HttpUserRepository(cradle.httpClient),
+  ).singleton(),
 
-  // Use cases (receive adapters via constructor injection)
-  userCreator: asClass(UserCreator).singleton(),
-  userFinder: asClass(UserFinder).singleton(),
+  // Use cases (receive the port, never the concrete adapter)
+  userCreator: asFunction((cradle: Cradle) => new UserCreator(cradle.userRepository)).singleton(),
+  userFinder: asFunction((cradle: Cradle) => new UserFinder(cradle.userRepository)).singleton(),
 })
 ```
+
+Rules:
+- `createContainer<Cradle>()` — no `injectionMode`. The default (`PROXY`) is irrelevant here
+  because nothing is registered with `asClass`.
+- One `asFunction` per registration, `.singleton()` in all three cases (the graph is stateless).
+- Adapters are registered **under the port's key** (`userRepository`), never under the
+  adapter's name — swapping `HttpUserRepository` for another adapter is a one-line change.
 
 ---
 
@@ -680,7 +706,9 @@ import { UseCase } from '@/base/lib/application/use-case.base'
 import { CreateUserProps } from '../../domain/props/create-user.props'
 
 export class UserCreator extends UseCase<CreateUserProps, User> {
-  constructor(private readonly userRepository: UserRepository) {}
+  constructor(private readonly userRepository: UserRepository) {
+    super() // mandatory: `UseCase` is a base class, so a derived constructor must call it
+  }
 
   async execute(props: CreateUserProps): Promise<Result<User>> {
     // ...

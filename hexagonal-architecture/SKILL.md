@@ -2,8 +2,8 @@
 name: hexagonal-architecture
 description: >
   Enforces hexagonal architecture (Ports & Adapters) with vertical slicing for all
-  TypeScript projects: NestJS monoliths, NestJS microservices, Vue.js SPAs, React SPAs,
-  React Native apps, and Next.js apps. Use this skill whenever the user creates a project,
+  TypeScript projects: NestJS monoliths, NestJS microservices, React SPAs, React Native
+  apps, and Next.js apps. Use this skill whenever the user creates a project,
   adds a module, scaffolds a feature, generates a use case, creates a repository, adds a
   controller, creates a component, adds a screen, or does anything involving file/folder
   structure. Also trigger when the user asks about architecture, folder structure, naming
@@ -11,8 +11,9 @@ description: >
   if the user doesn't explicitly mention "hexagonal" or "architecture", use this skill
   any time the task involves generating, moving, or restructuring TypeScript project files.
   Do NOT trigger for non-TypeScript work, standalone scripts, tooling/config-only changes
-  (CI, linters, dotfiles), or repositories that are not one of the six supported project
-  types (e.g. documentation or skills repos).
+  (CI, linters, dotfiles), or repositories that are not one of the five supported project
+  types (e.g. documentation or skills repos). Do NOT trigger for Vue.js SPAs — those are
+  covered by the `vuejs-hexagonal` skill.
 ---
 
 # Hexagonal Architecture Skill
@@ -35,12 +36,14 @@ Identify the project type from context (package.json, existing structure, or use
 |---|---|---|
 | NestJS Monolith | NestJS + multiple domains/modules | `references/backend-nestjs.md` |
 | NestJS Microservice | NestJS + single domain | `references/backend-nestjs.md` |
-| Vue.js SPA | Vue 3 + Vue Router | `references/frontend-spa-vue.md` |
 | React SPA | React + React Router (no Next.js) | `references/frontend-spa-react.md` |
 | React Native | Expo + React Navigation | `references/frontend-mobile-react-native.md` |
 | Next.js | Next.js + App Router | `references/frontend-nextjs.md` |
 
 **Always read the reference files before generating any structure.**
+
+> **Vue.js SPA** (Vue 3 + Vue Router) is **not** covered here: use the `vuejs-hexagonal`
+> skill instead.
 
 > If you cannot determine the project type from `package.json`, folder structure, or user
 > description, **ask the user before generating anything**. Never guess the project type.
@@ -99,12 +102,11 @@ This split makes the hexagonal direction explicit: driving adapters push into th
 | Event (backend) | `<Entity><Action>Event` | `UserCreatedEvent`, `OrderCancelledEvent` |
 | Port function Props | `<FunctionName>Props` | `FindByEmailProps`, `SaveUserProps` |
 | Value object | `<Entity><Field>ValueObject` | `UserEmailValueObject` |
-| Screen (SPA) | `<Screen>Screen.tsx\|vue` | `UserProfileScreen.tsx` |
+| Screen (SPA) | `<Screen>Screen.tsx` | `UserProfileScreen.tsx` |
 | ViewModel (SPA) | `use<Screen>ViewModel.ts` | `useUserProfileViewModel.ts` |
 | Page (Next.js) | `<Screen>Page.tsx` | `UserProfilePage.tsx` |
 | Client Component (Next.js) | `<Screen>Client.tsx` | `UserProfileClient.tsx` |
 | Server Action (Next.js) | `<action>.action.ts` | `update-user.action.ts` |
-| Store (Vue) | `<module>.store.ts` (Pinia) | `user.store.ts` |
 | Store (React/RN) | `<module>.store.ts` (Zustand) | `user.store.ts` |
 | Form Model (frontend) | `<Action><Entity>FormModel` | `CreateUserFormModel`, `ChangePasswordFormModel` |
 | Form Mapper (frontend) | `<Action><Entity>FormMapper` | `CreateUserFormMapper`, `ChangePasswordFormMapper` |
@@ -115,7 +117,7 @@ This split makes the hexagonal direction explicit: driving adapters push into th
 | Request DTO (backend) | `<Action>RequestDto` | `CreateUserRequestDto` |
 | Single Response wrapper | `SingleResponse<T>` | `SingleResponse<SpotCreatorOutput>` |
 | Paginated Response wrapper | `PaginatedResponse<T>` | `PaginatedResponse<SpotsFinderOutput>` |
-| Layout (SPA) | `<Scope>Layout.tsx\|vue` | `PublicLayout.tsx`, `PrivateLayout.tsx` |
+| Layout (SPA) | `<Scope>Layout.tsx` | `PublicLayout.tsx`, `PrivateLayout.tsx` |
 | Layout ViewModel (SPA) | `use<Scope>LayoutViewModel.ts` | `usePrivateLayoutViewModel.ts` |
 
 ## Naming Conventions — File Suffixes
@@ -162,7 +164,8 @@ Summary of the non-negotiables:
 - **Value objects** — validated single-value VO = class `<Entity><Field>ValueObject`; structural data VO = plain interface without suffix. Business VOs shared by ≥2 modules go in `modules/shared/domain/value-objects/`; aggregate-owned VOs in the module. Never in `src/base/` (technical machinery only).
 - **Port file isolation** — a port file (`domain/ports/<entity>.repository.ts`) declares **only** the port interface(s) and nothing else. Every supporting type it references — argument shapes and return/result wrappers — is extracted to its own file under `domain/props/`, never declared inline in the port file. Example: `SpotRepository` holds only the interface; its `MatchingSpots` result and its `CreateSpotProps` argument each live in `domain/props/`.
 - **Port parameters** — ports receive domain classes: reuse the use case's Command/Query/Props when the params match exactly; an `Event` for publishers; otherwise a dedicated `<FunctionName>Props` in `domain/props/` (suffix `.props.ts`) containing **only the fields that port method needs** (not the whole command). A port's return/result wrapper (e.g. `MatchingSpots = { items; total }`) is likewise its own file in `domain/props/`.
-- **UseCase base** — every use case `extends UseCase<I, O>` (never `implements`). Backend use cases return an `Output` or `Paginated<Output>` — never a domain entity or infra DTO; frontend use cases return domain data. Backend DI: use cases are plain providers injected by class; DI tokens are reserved for ports bound to adapters.
+- **UseCase base** — every use case `extends UseCase<I, O>` (never `implements`), so any constructor it declares **must call `super()`** — omitting it is a compile error (TS2377). Backend use cases return an `Output` or `Paginated<Output>` — never a domain entity or infra DTO; frontend use cases return domain data. Backend DI: use cases are plain providers injected by class; DI tokens are reserved for ports bound to adapters.
+- **Frontend DI (Awilix)** — wire every registration by hand with `asFunction((cradle) => new Foo(cradle.bar))`. **Never `asClass` + `InjectionMode.CLASSIC`**: it resolves by constructor parameter names and breaks in every minified production build (`Could not resolve 'e'`) while passing dev forever. Applies to React, React Native and Next.js (its server bundle is minified too); NestJS uses its own container and is unaffected.
 - **Output & Mapper (backend)** — each use-case folder holds `<uc>.use-case.ts`, `<uc>.output.ts` (curated API fields, dates as ISO strings), and `mapper/<uc>.mapper.ts` with a static `toOutput(entity)`.
 - **Form Model & Form Mapper (frontend)** — forms use an interface FormModel in `presentation/models/` plus a static FormMapper in `presentation/mappers/` that converts to domain `Props`, stripping UI-only fields.
 - **Screen Mapper & Presentation Models (frontend)** — one mapper per screen (`<Screen>Mapper`), methods named `<source>To<target>` (never `toModel`/`fromModel`), models are interfaces with only the fields the UI renders.
@@ -188,7 +191,6 @@ When the user asks to create a project from scratch, follow these steps:
    | Framework | Official Docs |
    |---|---|
    | NestJS | https://docs.nestjs.com |
-   | Vue.js | https://vuejs.org/guide/quick-start |
    | React (Vite) | https://vite.dev/guide |
    | React Native | https://docs.expo.dev/get-started/create-a-project |
    | Next.js | https://nextjs.org/docs/getting-started/installation |
@@ -226,7 +228,6 @@ Do not skip steps 6-8 unless the user explicitly says so.
 
 - **Universal conventions (all project types)** → read `references/universal-conventions.md` — full rules and canonical code templates for everything in the digest above
 - **NestJS (monolith or microservice)** → read `references/backend-nestjs.md`
-- **Vue.js SPA** → read `references/frontend-spa-vue.md`
 - **React SPA** → read `references/frontend-spa-react.md`
 - **React Native (Expo)** → read `references/frontend-mobile-react-native.md`
 - **Next.js** → read `references/frontend-nextjs.md`

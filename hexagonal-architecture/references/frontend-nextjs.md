@@ -216,10 +216,10 @@ What this enforces:
 
 Next.js is treated as its own category — **do NOT apply MVVM or ViewModels here**.
 
-| Concept | SPAs (Vue/React/RN) | Next.js |
+| Concept | SPAs (React/RN) | Next.js |
 |---|---|---|
 | Presentation pattern | MVVM with ViewModels | Server/Client Components + Server Actions |
-| Router | Vue Router / React Router / React Navigation | App Router (file system based) |
+| Router | React Router / React Navigation | App Router (file system based) |
 | `src/base/config/router/` | ✅ exists | ❌ does not exist — routing is file system |
 | ViewModels | ✅ `useXxxViewModel.ts` | ❌ does not apply |
 | Server Actions | ❌ | ✅ inside `presentation/screens/<screen>/actions/` |
@@ -524,11 +524,11 @@ In Next.js the container is **scoped per request** — the auth token is read fr
 
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, asValue, InjectionMode } from 'awilix'
+import { createContainer, asValue } from 'awilix'
 import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
 
 export function createRequestContainer(authToken?: string) {
-  const container = createContainer({ injectionMode: InjectionMode.CLASSIC })
+  const container = createContainer<Cradle>()
 
   container.register({
     httpClient: asValue(new AxiosHttpClient(authToken)),
@@ -537,6 +537,9 @@ export function createRequestContainer(authToken?: string) {
   return container
 }
 ```
+
+See the DI section below for the full container and for **why every dependency is wired
+by hand with `asFunction` instead of `asClass` + `InjectionMode.CLASSIC`.**
 
 ### Usage in Server Components / Server Actions
 ```typescript
@@ -615,19 +618,55 @@ Notes:
 
 In Next.js, Awilix is used in **Server Components and Server Actions** (server-side only):
 
+> **Never use `asClass` with `InjectionMode.CLASSIC` — it breaks in production.** CLASSIC
+> injection resolves dependencies by reading the **constructor parameter names**, which only
+> survive in unminified code. A production build minifies the server bundle too: the minifier
+> renames `userRepository` to `e`, Awilix then looks for a registration called `e`, and every
+> request dies with `Could not resolve 'e'. Resolution path: userCreator -> e`. It passes
+> `next dev` forever, because dev is never minified.
+>
+> Wire every dependency **by hand with `asFunction`**, reading it off the cradle. A property
+> access survives any build (minifiers do not rename properties), and it is also the better
+> hexagon: the composition root is the single place that knows the object graph, TypeScript
+> checks each `new` against the real constructor, and the classes keep honest typed
+> parameters instead of a magic cradle argument.
+
 ```typescript
 // src/base/config/di/container.ts
-import { createContainer, asClass, InjectionMode } from 'awilix'
+import { createContainer, asFunction } from 'awilix'
+import { AxiosHttpClient } from '@/base/config/http/axios.http-client'
+import type { UserRepository } from '@/modules/user/domain/ports/user.repository'
 import { HttpUserRepository } from '@/modules/user/infrastructure/repositories/http-user.repository'
 import { UserCreator } from '@/modules/user/application/use-cases/user-creator/user-creator.use-case'
 
-export const container = createContainer({ injectionMode: InjectionMode.CLASSIC })
+// Typed cradle: container.resolve('name') returns the right type, and a typo
+// in a registration name fails at compile time instead of at runtime.
+export interface Cradle {
+  httpClient: AxiosHttpClient
+  userRepository: UserRepository
+  userCreator: UserCreator
+}
+
+export const container = createContainer<Cradle>()
 
 container.register({
-  userRepository: asClass(HttpUserRepository).singleton(),
-  userCreator: asClass(UserCreator).singleton(),
+  // Adapters (the port key is bound to its adapter here)
+  userRepository: asFunction(
+    (cradle: Cradle) => new HttpUserRepository(cradle.httpClient),
+  ).singleton(),
+
+  // Use cases (receive the port, never the concrete adapter)
+  userCreator: asFunction((cradle: Cradle) => new UserCreator(cradle.userRepository)).singleton(),
 })
 ```
+
+Rules:
+- `createContainer<Cradle>()` — no `injectionMode`. The default (`PROXY`) is irrelevant here
+  because nothing is registered with `asClass`.
+- One `asFunction` per registration; `httpClient` is the exception, registered per request
+  with `asValue` (see *DI Registration* above).
+- Adapters are registered **under the port's key** (`userRepository`), never under the
+  adapter's name — swapping `HttpUserRepository` for another adapter is a one-line change.
 
 ---
 
@@ -657,7 +696,9 @@ import { UseCase } from '@/base/lib/application/use-case.base'
 import { CreateUserProps } from '../../domain/props/create-user.props'
 
 export class UserCreator extends UseCase<CreateUserProps, User> {
-  constructor(private readonly userRepository: UserRepository) {}
+  constructor(private readonly userRepository: UserRepository) {
+    super() // mandatory: `UseCase` is a base class, so a derived constructor must call it
+  }
 
   async execute(props: CreateUserProps): Promise<Result<User>> {
     // ...

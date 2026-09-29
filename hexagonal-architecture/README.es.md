@@ -24,12 +24,14 @@ descripción del usuario):
 |---|---|---|
 | Monolito NestJS | NestJS + múltiples dominios/módulos | `references/backend-nestjs.md` |
 | Microservicio NestJS | NestJS + un solo dominio | `references/backend-nestjs.md` |
-| SPA Vue.js | Vue 3 + Vue Router | `references/frontend-spa-vue.md` |
 | SPA React | React + React Router (sin Next.js) | `references/frontend-spa-react.md` |
 | React Native | Expo + React Navigation | `references/frontend-mobile-react-native.md` |
 | Next.js | Next.js + App Router | `references/frontend-nextjs.md` |
 
 **Siempre lee los archivos de referencia antes de generar cualquier estructura.**
+
+> **SPA de Vue.js** (Vue 3 + Vue Router) **no** se cubre aquí: usa la skill
+> `vuejs-hexagonal`.
 
 > Si no puedes determinar el tipo de proyecto desde `package.json`, estructura de
 > carpetas, o descripción del usuario, **pregunta al usuario antes de generar cualquier
@@ -90,12 +92,11 @@ Esta división hace explícita la dirección hexagonal: los driving adapters emp
 | Event (backend) | `<Entity><Action>Event` | `UserCreatedEvent`, `OrderCancelledEvent` |
 | Props de función de port | `<FunctionName>Props` | `FindByEmailProps`, `SaveUserProps` |
 | Value object | `<Entity><Field>ValueObject` | `UserEmailValueObject` |
-| Pantalla (SPA) | `<Screen>Screen.tsx\|vue` | `UserProfileScreen.tsx` |
+| Pantalla (SPA) | `<Screen>Screen.tsx` | `UserProfileScreen.tsx` |
 | ViewModel (SPA) | `use<Screen>ViewModel.ts` | `useUserProfileViewModel.ts` |
 | Página (Next.js) | `<Screen>Page.tsx` | `UserProfilePage.tsx` |
 | Client Component (Next.js) | `<Screen>Client.tsx` | `UserProfileClient.tsx` |
 | Server Action (Next.js) | `<action>.action.ts` | `update-user.action.ts` |
-| Store (Vue) | `<module>.store.ts` (Pinia) | `user.store.ts` |
 | Store (React/RN) | `<module>.store.ts` (Zustand) | `user.store.ts` |
 | Form Model (frontend) | `<Action><Entity>FormModel` | `CreateUserFormModel`, `ChangePasswordFormModel` |
 | Form Mapper (frontend) | `<Action><Entity>FormMapper` | `CreateUserFormMapper`, `ChangePasswordFormMapper` |
@@ -106,7 +107,7 @@ Esta división hace explícita la dirección hexagonal: los driving adapters emp
 | Request DTO (backend) | `<Action>RequestDto` | `CreateUserRequestDto` |
 | Wrapper Single Response | `SingleResponse<T>` | `SingleResponse<SpotCreatorOutput>` |
 | Wrapper Paginated Response | `PaginatedResponse<T>` | `PaginatedResponse<SpotsFinderOutput>` |
-| Layout (SPA) | `<Scope>Layout.tsx\|vue` | `PublicLayout.tsx`, `PrivateLayout.tsx` |
+| Layout (SPA) | `<Scope>Layout.tsx` | `PublicLayout.tsx`, `PrivateLayout.tsx` |
 | Layout ViewModel (SPA) | `use<Scope>LayoutViewModel.ts` | `usePrivateLayoutViewModel.ts` |
 
 ## Convenciones de nombres — Sufijos de archivo
@@ -153,7 +154,8 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **Value objects** — VO validado de un solo valor = clase `<Entity><Field>ValueObject`; VO de datos estructural = interface plana sin sufijo. Los VOs de negocio compartidos por ≥2 módulos van en `modules/shared/domain/value-objects/`; los VOs propios de un agregado, en su módulo. Nunca en `src/base/` (solo maquinaria técnica).
 - **Aislamiento del archivo del port** — un archivo de port (`domain/ports/<entity>.repository.ts`) declara **solo** la(s) interfaz(es) del port y nada más. Todo tipo auxiliar que referencie — formas de argumentos y wrappers de retorno/resultado — se extrae a su propio archivo en `domain/props/`, nunca declarado inline en el archivo del port. Ejemplo: `SpotRepository` contiene solo la interfaz; su resultado `MatchingSpots` y su argumento `CreateSpotProps` viven cada uno en `domain/props/`.
 - **Parámetros de ports** — los ports reciben clases de dominio: reutiliza el Command/Query/Props del use case cuando los parámetros coinciden exactamente; un `Event` para publishers; en otro caso un `<FunctionName>Props` dedicado en `domain/props/` (sufijo `.props.ts`) que contenga **solo los campos que ese método del port necesita** (no el command completo). El wrapper de retorno/resultado de un port (p. ej. `MatchingSpots = { items; total }`) también es su propio archivo en `domain/props/`.
-- **Base UseCase** — todo use case hace `extends UseCase<I, O>` (nunca `implements`). Los use cases de backend retornan un `Output` o `Paginated<Output>` — nunca una entidad de dominio ni un DTO de infra; los de frontend retornan datos de dominio. DI en backend: los use cases son providers planos inyectados por clase; los tokens DI se reservan para ports enlazados a adapters.
+- **Base UseCase** — todo use case hace `extends UseCase<I, O>` (nunca `implements`), así que cualquier constructor que declare **debe llamar a `super()`** — omitirlo es un error de compilación (TS2377). Los use cases de backend retornan un `Output` o `Paginated<Output>` — nunca una entidad de dominio ni un DTO de infra; los de frontend retornan datos de dominio. DI en backend: los use cases son providers planos inyectados por clase; los tokens DI se reservan para ports enlazados a adapters.
+- **DI en frontend (Awilix)** — cablea cada registro a mano con `asFunction((cradle) => new Foo(cradle.bar))`. **Nunca `asClass` + `InjectionMode.CLASSIC`**: resuelve por los nombres de los parámetros del constructor y se rompe en cualquier build de producción minificado (`Could not resolve 'e'`), mientras pasa en dev para siempre. Aplica a React, React Native y Next.js (su bundle de servidor también se minifica); NestJS usa su propio contenedor y no se ve afectado.
 - **Output y Mapper (backend)** — cada carpeta de use case contiene `<uc>.use-case.ts`, `<uc>.output.ts` (campos curados de la API, fechas como strings ISO) y `mapper/<uc>.mapper.ts` con un `toOutput(entity)` estático.
 - **Form Model y Form Mapper (frontend)** — los formularios usan una interface FormModel en `presentation/models/` más un FormMapper estático en `presentation/mappers/` que convierte a `Props` de dominio, eliminando los campos solo-UI.
 - **Screen Mapper y Presentation Models (frontend)** — un mapper por pantalla (`<Screen>Mapper`), métodos nombrados `<source>To<target>` (nunca `toModel`/`fromModel`), los models son interfaces con solo los campos que la UI renderiza.
@@ -179,7 +181,6 @@ Cuando el usuario pida crear un proyecto desde cero, sigue estos pasos:
    | Framework | Docs oficiales |
    |---|---|
    | NestJS | https://docs.nestjs.com |
-   | Vue.js | https://vuejs.org/guide/quick-start |
    | React (Vite) | https://vite.dev/guide |
    | React Native | https://docs.expo.dev/get-started/create-a-project |
    | Next.js | https://nextjs.org/docs/getting-started/installation |
@@ -217,7 +218,6 @@ No te saltes los pasos 6-8 a menos que el usuario lo diga explícitamente.
 
 - **Convenciones universales (todos los tipos de proyecto)** → lee `references/universal-conventions.md` — reglas completas y plantillas de código canónicas de todo lo resumido arriba
 - **NestJS (monolito o microservicio)** → lee `references/backend-nestjs.md`
-- **SPA Vue.js** → lee `references/frontend-spa-vue.md`
 - **SPA React** → lee `references/frontend-spa-react.md`
 - **React Native (Expo)** → lee `references/frontend-mobile-react-native.md`
 - **Next.js** → lee `references/frontend-nextjs.md`

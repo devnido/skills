@@ -19,27 +19,11 @@ slicing y MVVM, en **SPAs de Vue.js**. Este archivo es el router y el resumen de
 
 | Aplica a | NO aplica a |
 |---|---|
-| SPA de Vue 3 (Composition API) + Vue Router + Pinia, construida con Vite | NestJS, React SPA, React Native, Next.js → usa la skill `hexagonal-architecture` |
+| SPA de Vue 3 (Composition API) + Vue Router + Pinia + Pinia Colada, construida con Vite | NestJS, React SPA, React Native, Next.js → usa la skill `hexagonal-architecture` |
 
 Confirma que el proyecto es una SPA de Vue mirando el `package.json` (`vue`, `vue-router`,
 `vite`) o la estructura existente. **Si no puedes determinar el tipo de proyecto, pregunta
 al usuario antes de generar nada.** Nunca adivines.
-
-### Monorepos (varios proyectos en un repo)
-
-- El **`package.json` más cercano** subiendo desde el archivo que estás tocando define el
-  proyecto y su tipo. Un `package.json` raíz con `workspaces` (o `pnpm-workspace.yaml`,
-  `turbo.json`, `nx.json`) **no es un proyecto** — es orquestación; nunca detectes el tipo
-  desde ahí.
-- Todas las rutas de esta skill (`src/`, `tests/`, `.env.example`, config de ESLint) son
-  relativas a **la raíz de ese proyecto**, nunca a la raíz del repo.
-- **Cada proyecto es su propio hexágono.** Nunca importes código de un proyecto hermano —
-  la SPA habla con otros servicios solo a través de sus contratos públicos (la API REST).
-  La duplicación de `src/base/` entre proyectos hermanos es **deliberada**; no la
-  "dedupliques" en un paquete del workspace — extraer un paquete compartido es una
-  decisión explícita del usuario, nunca una iniciativa del agente.
-- Si el cambio pertenece a un proyecto hermano que no es Vue, detente y usa la skill
-  `hexagonal-architecture` para ese proyecto.
 
 ---
 
@@ -113,8 +97,10 @@ Las reglas completas y las plantillas de código canónicas viven en
   **nunca lanzan**. Los adapters hacen `try/catch` del cliente HTTP y convierten **todo**
   fallo en `Result.err` (mapeando estados conocidos a excepciones de dominio;
   `HttpServiceException` es el fallback genérico). El **ViewModel** hace unwrap del `Result`
-  con `isErr()` y mapea el `code` del error a estado de UI — nunca lanza, y `try/catch` no
-  es su canal de errores.
+  dentro de su función `query` / `mutation` de Pinia Colada con
+  `if (result.isErr()) throw result.getError()` — el **único `throw` de la SPA** — y mapea
+  el `code` del error capturado a estado de UI; fuera de esas funciones nunca lanza, y
+  `try/catch` no es su canal de errores.
 - **Clases base de dominio** (`src/base/lib/domain/`) — `Command`, `Query`, `Props`
   (nominales gracias a un campo privado `_brand`) y `DomainException extends Error` (`code`
   abstracto y estable, mensaje vía `super`). Todo input y todo error extiende su base.
@@ -154,18 +140,40 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **MVVM (obligatorio)** — la Screen (View) es pasiva: consume únicamente lo que devuelve su
   ViewModel y nunca importa `domain/` / `application/`, el contenedor de DI, stores ni
   mappers. El ViewModel (`use<Screen>ViewModel`) recibe los parámetros de ruta como
-  argumentos, se auto-inicializa (`onMounted` dentro del ViewModel), resuelve los casos de
-  uso del contenedor de Awilix una sola vez arriba, construye clases Props, hace unwrap del
-  `Result` y devuelve **solo** Presentation Models + estado de UI (`isLoading`, `error`) +
-  funciones de acción.
+  argumentos, se auto-inicializa (su `useQuery` corre solo — no hace falta `onMounted` para
+  cargar), resuelve los casos de uso del contenedor de Awilix una sola vez arriba, construye
+  clases Props, hace unwrap del `Result` y devuelve **solo** Presentation Models + estado de
+  UI (`isLoading`, `error` como `string | null`) + funciones de acción — nunca los objetos
+  query/mutation.
+- **Estado de servidor con Pinia Colada (confinado a los ViewModels)** — las lecturas usan
+  `useQuery`; las escrituras usan `useMutation` e invalidan las keys que cambiaron
+  (`useQueryCache().invalidateQueries`). Solo los ViewModels importan `@pinia/colada` (más
+  `main.ts`, `src/base/config/colada/` y el helper de tests del ViewModel). La caché guarda
+  **datos de dominio**; el ViewModel los mapea a Presentation Models con `computed` + el
+  Screen Mapper. Las keys son `[module, action, ...params]` (un getter cuando un parámetro es
+  reactivo). La política técnica (`staleTime`) vive en
+  `src/base/config/colada/colada.options.ts`.
 - **DI con Awilix** — el contenedor tipado vive en `src/base/config/di/container.ts` (no hay
   DI a nivel de framework). Los ports se registran ligados a su adapter; solo los ViewModels
-  resuelven del contenedor.
-- **Store de Pinia** — guarda **solo** estado transversal entre pantallas. Los ViewModels lo
-  leen/escriben; las Views nunca lo importan. Los tokens nunca viven en el store.
+  resuelven del contenedor. **Cablea cada registro a mano con
+  `asFunction((cradle) => new Foo(cradle.bar))` — nunca `asClass` + `InjectionMode.CLASSIC`,
+  que resuelve por los nombres de los parámetros del constructor y se rompe en cualquier
+  build de producción minificado** (`Could not resolve 'e'`), mientras pasa en dev para
+  siempre.
+- **Constructores de casos de uso** — un caso de uso `extends UseCase`, así que cualquier
+  constructor que declare **debe llamar a `super()`**; omitirlo es un error de compilación
+  (TS2377).
+- **Rutas del módulo** — `*.routes.ts` exporta un `RouteRecordRaw[]` (un **array**, incluso
+  para una sola ruta); el router compone los módulos con spread, así que exportar un objeto
+  suelto falla en runtime con `is not iterable`.
+- **Store de Pinia** — guarda **solo** estado de cliente transversal entre pantallas (sesión,
+  filtros recordados); los datos del servidor viven en la caché de Pinia Colada, nunca
+  copiados a un store. Los ViewModels lo leen/escriben; las Views nunca lo importan. Los
+  tokens nunca viven en el store.
 - **Testing** — dominio: tests unitarios puros; aplicación: tests unitarios con ports
   mockeados; infraestructura: tests unitarios con el cliente HTTP mockeado; presentación:
-  tests del ViewModel (sobrescribiendo los registros del contenedor con `asValue(mock)`) y
+  tests del ViewModel (sobrescribiendo los registros del contenedor con `asValue(mock)`,
+  ejecutados con un helper `withSetup` que instala un Pinia + Pinia Colada nuevo por test) y
   tests de componentes con `@vue/test-utils`. Los tests viven en `tests/` replicando `src/`.
   **Genera los tests desde las plantillas canónicas** de la referencia — mockea solo en la
   costura port / caso de uso; los fixtures de entidades vienen de builders en
@@ -203,8 +211,9 @@ Las reglas completas y las plantillas de código canónicas viven en
 4. **Haz el scaffolding** con el comando verificado (TypeScript, Vue Router, Pinia, ESLint,
    Prettier).
 5. **Instala las dependencias** listadas en la referencia de Vue (Tailwind, Axios, Awilix,
-   zod, Vitest, `@vue/test-utils`, `eslint-plugin-boundaries`, husky, lint-staged).
-6. **Crea `src/base/`** con `config/` y `lib/` como describen las referencias.
+   zod, Pinia Colada, Vitest, `@vue/test-utils`, `eslint-plugin-boundaries`, husky, lint-staged).
+6. **Crea `src/base/`** con `config/` y `lib/` como describen las referencias, e instala
+   Pinia Colada en `main.ts` con las opciones de `src/base/config/colada/`.
 7. **Configura la imposición de límites** (ESLint) y los hooks de Husky + lint-staged.
 8. **Crea el primer módulo** (si el usuario indicó un dominio) siguiendo la estructura de
    carpetas y las 4 capas.
@@ -219,7 +228,8 @@ Las reglas completas y las plantillas de código canónicas viven en
 4. **Genera los archivos** siguiendo las convenciones de nombres (nombres de clase *y*
    sufijos de archivo).
 5. **Respeta la regla de dependencias** — `domain/` no importa nada de capas externas.
-6. **Aplica MVVM** — cada pantalla nueva tiene su ViewModel; la View queda pasiva.
+6. **Aplica MVVM** — cada pantalla nueva tiene su ViewModel; la View queda pasiva; los datos
+   del servidor pasan por Pinia Colada dentro del ViewModel.
 7. **Registra en la DI** — agrega el port/adapter y el caso de uso al contenedor de Awilix.
 8. **Agrega las rutas** al `*.routes.ts` del módulo y regístralas en el router.
 9. **Genera los tests** en `tests/` replicando `src/`: `src/.../foo.ts` →
@@ -237,8 +247,9 @@ No omitas los pasos 6-9 salvo que el usuario lo pida explícitamente.
 
 ## Skills relacionadas
 
-- `hexagonal-architecture` — la versión multi-stack (NestJS, React, React Native, Next.js y
-  Vue). Úsala cuando la tarea **no** sea una SPA de Vue.
+- `hexagonal-architecture` — la misma arquitectura para NestJS, React SPA, React Native y
+  Next.js. **No** cubre Vue: esta skill es la única fuente para SPAs de Vue. Úsala cuando la
+  tarea **no** sea una SPA de Vue.
 - `criteria-pattern` — filtros dinámicos + orden + paginación detrás de un único método
   `matching(criteria)` en el repositorio.
 
