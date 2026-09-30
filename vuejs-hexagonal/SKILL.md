@@ -126,8 +126,9 @@ Summary of the non-negotiables:
 - **`Paginated<T>`** (`src/base/lib/domain/paginated.ts`) — canonical return for
   collections: `items / total / page / limit`. No `totalPages` — it is derived in the
   presentation layer.
-- **Domain entities** — `id`, `createdAt`, `updatedAt` are required and non-nullable; no
-  shared `Entity` base class. `new <Entity>(...)` is allowed only in infrastructure→domain
+- **Domain entities** — `id` is required and non-nullable; `createdAt` / `updatedAt` are
+  declared only when the data source returns them (a read projection may have neither),
+  and never fabricated; no shared `Entity` base class. `new <Entity>(...)` is allowed only in infrastructure→domain
   mappers (canonical), in test builders, or, exceptionally, in a use case when every field
   already exists in memory. Never build an entity for data that doesn't exist yet — pass
   the Props to the adapter; it persists and returns the entity.

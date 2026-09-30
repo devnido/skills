@@ -109,8 +109,9 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **`Paginated<T>`** (`src/base/lib/domain/paginated.ts`) — retorno canónico para
   colecciones: `items / total / page / limit`. Sin `totalPages` — se deriva en la capa de
   presentación.
-- **Entidades de dominio** — `id`, `createdAt`, `updatedAt` son obligatorios y no nulables;
-  no hay clase base `Entity` compartida. `new <Entity>(...)` solo se permite en mappers de
+- **Entidades de dominio** — `id` es obligatorio y no nulable; `createdAt` / `updatedAt` se
+  declaran solo cuando la fuente de datos los devuelve (una proyección de lectura puede no
+  tener ninguno), y nunca se inventan; no hay clase base `Entity` compartida. `new <Entity>(...)` solo se permite en mappers de
   infraestructura→dominio (caso canónico), en builders de test o, excepcionalmente, en un
   caso de uso cuando todos los campos ya existen en memoria. Nunca construyas una entidad
   para datos que aún no existen — pasa los Props al adapter; él persiste y devuelve la entidad.

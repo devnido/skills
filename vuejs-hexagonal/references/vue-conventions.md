@@ -174,15 +174,13 @@ Rules:
 
 Domain entities (e.g. `User`, `Product`, `Spot`) represent persisted business objects and follow strict construction rules.
 
-**1. Required attributes — every domain entity MUST have:**
-- `id` — non-nullable, assigned by the persistence layer (or generated upstream when justified)
-- `createdAt: Date` — non-nullable, set when the entity is first persisted
-- `updatedAt: Date` — non-nullable, updated on every mutation
-
-These three fields are **never optional and never nullable**. An object missing any of them is not a valid domain entity.
+**1. Identity and timestamps:**
+- `id` — **required** and non-nullable, assigned by the persistence layer (or generated upstream when justified). An object without identity is not an entity: model it as a value object.
+- `createdAt: Date` / `updatedAt: Date` — **only when the data source returns them**. The SPA models what the API gives it: a read projection (e.g. a pending comment that only carries its `commentedDate`) declares no timestamps at all. When the API does return them, declare them non-nullable.
+- **Never fabricate** a timestamp (`new Date()` filler, epoch default) to satisfy a shape.
 
 ```typescript
-// domain/entities/user.entity.ts
+// domain/entities/user.entity.ts — the API returns both timestamps, so the entity declares them
 export class User {
   constructor(
     public readonly id: string,
@@ -211,14 +209,14 @@ There is **no** shared `Entity` base class. Each entity declares its own fields 
    **b) Inside a test builder** (`tests/modules/<module>/builders/`) to create fixtures — builders live in `tests/`, never in `src/` (see *Testing Conventions*).
 
    **c) Inside a use case, only when ALL of the following hold:**
-   - Every required field (`id`, `createdAt`, `updatedAt`, plus all business fields) is already available in memory — no nullables, no placeholders, no `new Date()` fillers for `createdAt` of something that hasn't been persisted yet.
+   - Every field the entity declares (`id`, its timestamps if it has them, plus all business fields) is already available in memory — no nullables, no placeholders, no `new Date()` fillers for `createdAt` of something that hasn't been persisted yet.
    - There is a **justifiable purpose** for constructing it in the use case rather than delegating to an adapter (e.g. assembling an entity from already-fetched pieces, in-memory projection, test fixtures inside the use case is **not** a valid reason).
    - If in doubt, delegate to the adapter and let the mapper build it.
 
 **3. Forbidden:**
 - ❌ Instantiating an entity in presentation, application orchestration, or anywhere else.
 - ❌ Instantiating an entity to represent data that does **not yet exist** in the data source (e.g. "build a `User` to pass to `userRepository.create(user)`"). For creation/modification flows, pass a `Command`, `Query`, or `Props` to the adapter — the adapter persists and returns the fully-formed entity.
-- ❌ Making `id`, `createdAt`, or `updatedAt` optional, nullable, or defaulted in the constructor.
+- ❌ Making `id` optional, nullable, or defaulted in the constructor; or making a declared `createdAt` / `updatedAt` optional or defaulted (if the source does not always return it, the entity does not declare it).
 
 **4. Data flow for create/update:**
 ```
