@@ -322,22 +322,22 @@ minified production build. Only ViewModels resolve from the container. See the D
 
 ## Form Model & Form Mapper Convention
 
-When a screen has a form, the presentation layer defines:
+When a screen has a form, its screen folder (`src/screens/<area>/<screen-slug>/`) defines:
 
-1. **Form Model** — an `interface` in `presentation/models/` that represents the form fields as the UI sees them
-2. **Form Mapper** — a static class in `presentation/mappers/` that converts the Form Model into the domain `Props` class before calling the use case
+1. **Form Model** — an `interface` in the screen's `models/` that represents the form fields as the UI sees them
+2. **Form Mapper** — a static class in the screen folder that converts the Form Model into the domain `Props` class before calling the use case
 
-This keeps the presentation layer decoupled from the domain: the form works with its own model, and the mapper handles the translation.
+This keeps the screen decoupled from the domain: the form works with its own model, and the mapper handles the translation.
 
 ```typescript
-// presentation/models/create-user.form-model.ts
+// screens/users/user-create/models/create-user.form-model.ts
 export interface CreateUserFormModel {
   name: string
   email: string
   passwordConfirmation: string  // UI-only field, not part of domain Props
 }
 
-// presentation/mappers/create-user.form-mapper.ts
+// screens/users/user-create/create-user.form-mapper.ts
 import type { CreateUserFormModel } from '../models/create-user.form-model'
 import { CreateUserProps } from '../../domain/props/create-user.props'
 
@@ -379,20 +379,20 @@ Each mapping method is named after its source and target with the pattern `<sour
 This keeps the direction explicit and avoids ambiguous `toModel` / `fromModel` names when one mapper handles multiple types.
 
 ```typescript
-// presentation/models/user-summary.model.ts
+// screens/users/user-profile/models/user-summary.model.ts
 export interface UserSummaryModel {
   fullName: string
   initials: string
   joinedLabel: string  // pre-formatted for the UI, e.g. "Joined 2 months ago"
 }
 
-// presentation/models/user-permissions.model.ts
+// screens/users/user-profile/models/user-permissions.model.ts
 export interface UserPermissionsModel {
   canEdit: boolean
   canDelete: boolean
 }
 
-// presentation/mappers/user-profile-screen.mapper.ts
+// screens/users/user-profile/user-profile-screen.mapper.ts
 import type { User } from '@/modules/user/domain/user.entity'
 import type { UserSummaryModel } from '../models/user-summary.model'
 import type { UserPermissionsModel } from '../models/user-permissions.model'
@@ -417,10 +417,11 @@ export class UserProfileScreenMapper {
 
 Rules:
 - **Only map fields the UI actually uses**. Never spread an entity or copy fields the screen does not render.
-- One mapper per screen. The mapper file is named after the screen.
+- One mapper per screen, in the screen folder. The mapper file is named after the screen.
 - Method names follow `<Source>To<Target>` using the real class names — never generic `toModel` / `fromModel`.
 - Presentation Models are interfaces (not classes) unless behavior is needed.
-- Models live in `presentation/models/` with free base names + `Model` suffix.
+- Models live in the screen's `models/` with free base names + `Model` suffix; a model two
+  screens of one area share goes up to `src/screens/<area>/`.
 
 ## Auth & Session Convention
 
@@ -497,7 +498,7 @@ async function doRefresh(storage: TokenStorage): Promise<AuthTokens | null> {
 ### 3. Session state
 
 - Current-user state (`isAuthenticated`, profile summary) lives in the **auth module's
-  store** (`modules/auth/presentation/store/auth.store.ts`). It is cross-screen state, so
+  store** (`src/shared/stores/auth.store.ts`, shared by every area). It is cross-screen state, so
   the MVVM rules apply: only ViewModels read/write it, Views never import it.
 - `PrivateLayout` / `usePrivateLayoutViewModel` guards private screens by reading that
   store (see the Layouts Convention in `frontend-spa-vue.md`).
@@ -511,7 +512,7 @@ async function doRefresh(storage: TokenStorage): Promise<AuthTokens | null> {
 | `domain/` | Unit tests — pure, no mocks | None |
 | `application/` | Unit tests | Mock ports (interfaces) |
 | `infrastructure/` | Unit tests | Mock HTTP clients, ORM clients, etc. |
-| `presentation/` | Component tests | Mock the ViewModel composable |
+| `src/screens/`, `src/shared/` | ViewModel and component tests | Override use cases in the container; mock the ViewModel in component tests |
 
 Testing stack: **Vitest** as the runner and **`@vue/test-utils`** for component tests.
 
@@ -587,9 +588,9 @@ case never throws, so never assert with `rejects`; never touch the network.
 **2. Screen Mapper / Form Mapper — pure, no mocks:**
 
 ```typescript
-// tests/modules/user/presentation/mappers/user-profile-screen.mapper.spec.ts
-import { UserProfileScreenMapper } from '@/modules/user/presentation/mappers/user-profile-screen.mapper'
-import { buildUser } from '../../builders/user.builder'
+// tests/screens/users/user-profile/user-profile-screen.mapper.spec.ts
+import { UserProfileScreenMapper } from '@/screens/users/user-profile/user-profile-screen.mapper'
+import { buildUser } from '../../../modules/user/builders/user.builder'
 
 describe('UserProfileScreenMapper', () => {
   it('maps the entity to the model the screen renders', () => {
@@ -668,20 +669,32 @@ The project uses `husky` + `lint-staged` for pre-commit hooks that run linting a
 
 ## Dependency Rule (enforced via `eslint-plugin-boundaries`)
 
-- Modules **never** import from other modules — **except screens**: a screen
-  (`presentation/screens/<screen>/`, its View and ViewModel) may run another module's use
-  cases and import their input `Props` and returned domain types (entities, value
-  objects). The use case lives once, in the module that owns the resource, and every
-  screen that needs it reuses it; nothing is duplicated.
-- Nothing else crosses modules: not components, stores, mappers or models of the
-  presentation layer, and never `domain/`, `application/` or `infrastructure/`. A module
-  never duplicates a port or adapter that another module owns.
+The SPA has two trees: **modules** (`src/modules/<module>/`, business only: `domain/`,
+`application/`, `infrastructure/` — no presentation) and **screens**
+(`src/screens/<area>/<screen-slug>/`), plus `src/shared/` for transversal UI. Screens live
+outside the modules because a screen usually combines several resources (a create form
+uses its entity, a related entity search and a geocoder; a list shows counters of a
+summary): screens orchestrate, modules hold the business.
+
+| From | May import |
+|---|---|
+| screen `src/screens/<area>/<slug>/` | `application/` and `domain/` of **any** module (use cases, their `Props`, returned domain types); its own folder; its area (`<area>.store.ts`, area components); `src/shared/`; `src/base/` |
+| area `src/screens/<area>/*.ts` (routes, store) | its screens, `src/shared/`, `src/base/` |
+| layout `src/shared/layouts/` | same as a screen (the private layout runs the logout use case) |
+| `src/shared/components/`, `src/shared/stores/` | `src/shared/`, `src/base/`, module `domain/` **types** only — never use cases |
+| `domain/` | its own `domain/`, `modules/shared/domain/`, `src/base/` |
+| `application/` | its own `domain/` and `application/`, `modules/shared/`, `src/base/` |
+| `infrastructure/` | its own `domain/`, `application/`, `infrastructure/`, `modules/shared/`, `src/base/` |
+| composition root `src/base/config/di/`, `src/base/config/router/` | everything |
+
+- A module **never** imports another module or a screen. The use case lives once, in the
+  module that owns the resource; every screen that needs it reuses it. A module never
+  duplicates a port or adapter that another module owns.
+- A screen never imports a module's `infrastructure/` (the DI container resolves it) and
+  never another screen: what two screens of one area share goes to `src/screens/<area>/`;
+  what two areas share goes to `src/shared/`.
 - If a *business concept* (not a use case) is needed in more than one module → move it to
-  `modules/shared/`
-- `domain/` has zero external dependencies
-- `application/` depends only on `domain/`
-- `infrastructure/` depends on `application/` and `domain/`
-- `presentation/` depends on `application/` and `domain/`
+  `modules/shared/`.
 
 These rules are **enforced at lint time** using `eslint-plugin-boundaries`, installed as a dev dependency and configured with one boundary element per layer, `default: 'disallow'`, and explicit `allow` rules matching the list above. Violations fail lint and therefore fail the `lint-staged` pre-commit hook.
 
@@ -900,7 +913,7 @@ src/modules/user/application/use-cases/users-finder/
 ```
 
 There is **no** `Output` class and **no** use-case mapper in a Vue SPA: the use case returns
-domain data, and the **Screen Mapper** (`presentation/mappers/`) turns it into Presentation
+domain data, and the **Screen Mapper** (in the screen folder, `src/screens/<area>/<screen-slug>/`) turns it into Presentation
 Models. That pair is the frontend equivalent of the backend's Output + Mapper.
 
 **Tests:**
@@ -908,6 +921,6 @@ Models. That pair is the frontend equivalent of the backend's Output + Mapper.
 tests/modules/user/application/use-cases/user-creator/
 └── user-creator.use-case.spec.ts
 
-tests/modules/user/presentation/mappers/
+tests/screens/users/user-profile/
 └── user-profile-screen.mapper.spec.ts
 ```

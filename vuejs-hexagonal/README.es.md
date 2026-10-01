@@ -29,13 +29,21 @@ al usuario antes de generar nada.** Nunca adivines.
 
 ## Capas
 
-Cada módulo tiene exactamente 4 capas:
-1. **domain/** — entidades, value objects, ports (interfaces), props, excepciones de dominio
-2. **application/** — casos de uso
-3. **infrastructure/** — adapters (repositorios HTTP), mappers de infraestructura, DTOs/records
-4. **presentation/** — screens (vistas), ViewModels, componentes, models, mappers, store, rutas
+La SPA tiene **dos árboles**: módulos de negocio y pantallas.
 
-El **lado driving** de la SPA es la capa de presentación: el **ViewModel es el adapter
+- **`src/modules/<module>/`** — solo negocio, exactamente 3 capas, **sin presentación**:
+  1. **domain/** — entidades, value objects, ports (interfaces), props, excepciones de dominio
+  2. **application/** — casos de uso
+  3. **infrastructure/** — adapters (repositorios HTTP), mappers de infraestructura, DTOs/records
+- **`src/screens/<area>/<screen-slug>/`** — una carpeta por pantalla (View, ViewModel,
+  screen mapper, form mapper, `models/`, sus propios `components/`), agrupadas por
+  **área** (una sección del menú, normalmente con el nombre del módulo que más usa). El
+  área tiene `<area>.routes.ts` y, si sus pantallas comparten estado de cliente,
+  `<area>.store.ts`. Una pantalla combina casos de uso de **cualquier** módulo.
+- **`src/shared/`** — UI transversal: `components/ui/` (la librería de componentes),
+  `layouts/`, `stores/` (p. ej. la sesión).
+
+El **lado driving** de la SPA es la pantalla: el **ViewModel es el adapter
 driving** (el análogo en SPA de un controller de backend) — es el único lugar que resuelve
 casos de uso del contenedor de DI y el único que hace unwrap de un `Result`. El **lado
 driven** es `infrastructure/`: repositorios HTTP que implementan los ports del dominio.
@@ -56,7 +64,7 @@ driven** es `infrastructure/`: repositorios HTTP que implementan los ports del d
 | Value object | `<Entity><Field>ValueObject` | `UserEmailValueObject` |
 | Screen (View) | `<Screen>Screen.vue` | `UserProfileScreen.vue` |
 | ViewModel | `use<Screen>ViewModel.ts` | `useUserProfileViewModel.ts` |
-| Store (Pinia) | `<module>.store.ts` | `user.store.ts` |
+| Store (Pinia) | `<area>.store.ts` | `users.store.ts` |
 | Form Model | `<Action><Entity>FormModel` | `CreateUserFormModel` |
 | Form Mapper | `<Action><Entity>FormMapper` | `CreateUserFormMapper` |
 | Screen Mapper | `<Screen>Mapper` | `LoginScreenMapper`, `UserProfileScreenMapper` |
@@ -81,7 +89,7 @@ driven** es `infrastructure/`: repositorios HTTP que implementan los ports del d
 | Form Model | `.form-model.ts` | `create-user.form-model.ts` |
 | Form Mapper | `.form-mapper.ts` | `create-user.form-mapper.ts` |
 | Store | `.store.ts` | `user.store.ts` |
-| Rutas | `.routes.ts` | `user.routes.ts` |
+| Rutas | `<area>.routes.ts` | `users.routes.ts` |
 | Test | `.spec.ts` | `user-creator.use-case.spec.ts` |
 
 Todos los nombres de archivo usan **kebab-case**, excepto los SFC de Vue (`.vue`: screens,
@@ -107,8 +115,8 @@ Las reglas completas y las plantillas de código canónicas viven en
   Genera estos archivos desde las plantillas de la referencia — nunca improvises su forma.
   En la SPA **no** hay base `Output` ni base `Event`.
 - **`Paginated<T>`** (`src/base/lib/domain/paginated.ts`) — retorno canónico para
-  colecciones: `items / total / page / limit`. Sin `totalPages` — se deriva en la capa de
-  presentación.
+  colecciones: `items / total / page / limit`. Sin `totalPages` — se deriva en las
+  pantallas (Screen Mapper / ViewModel).
 - **Entidades de dominio** — `id` es obligatorio y no nulable; `createdAt` / `updatedAt` se
   declaran solo cuando la fuente de datos los devuelve (una proyección de lectura puede no
   tener ninguno), y nunca se inventan; no hay clase base `Entity` compartida. `new <Entity>(...)` solo se permite en mappers de
@@ -130,8 +138,8 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **Base UseCase** — todo caso de uso `extends UseCase<I, O>` (nunca `implements`) y
   devuelve **datos de dominio envueltos en un `Result`** — nunca un Presentation Model, un
   DTO HTTP crudo ni un valor sin envolver.
-- **Form Model y Form Mapper** — los formularios usan una interfaz FormModel en
-  `presentation/models/` más un FormMapper estático en `presentation/mappers/` que la
+- **Form Model y Form Mapper** — los formularios usan una interfaz FormModel en los
+  `models/` de la pantalla más un FormMapper estático en la carpeta de la pantalla que la
   convierte en un `Props` de dominio, descartando campos solo de UI (p. ej.
   `passwordConfirmation`).
 - **Screen Mapper y Presentation Models** — un mapper por pantalla (`<Screen>Mapper`),
@@ -164,30 +172,33 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **Constructores de casos de uso** — un caso de uso `extends UseCase`, así que cualquier
   constructor que declare **debe llamar a `super()`**; omitirlo es un error de compilación
   (TS2377).
-- **Rutas del módulo** — `*.routes.ts` exporta un `RouteRecordRaw[]` (un **array**, incluso
-  para una sola ruta); el router compone los módulos con spread, así que exportar un objeto
+- **Rutas del área** — `<area>.routes.ts` exporta un `RouteRecordRaw[]` (un **array**, incluso
+  para una sola ruta); el router compone las áreas con spread, así que exportar un objeto
   suelto falla en runtime con `is not iterable`.
 - **Store de Pinia** — guarda **solo** estado de cliente transversal entre pantallas (sesión,
   filtros recordados); los datos del servidor viven en la caché de Pinia Colada, nunca
   copiados a un store. Los ViewModels lo leen/escriben; las Views nunca lo importan. Los
   tokens nunca viven en el store.
 - **Testing** — dominio: tests unitarios puros; aplicación: tests unitarios con ports
-  mockeados; infraestructura: tests unitarios con el cliente HTTP mockeado; presentación:
+  mockeados; infraestructura: tests unitarios con el cliente HTTP mockeado; pantallas:
   tests del ViewModel (sobrescribiendo los registros del contenedor con `asValue(mock)`,
   ejecutados con un helper `withSetup` que instala un Pinia + Pinia Colada nuevo por test) y
   tests de componentes con `@vue/test-utils`. Los tests viven en `tests/` replicando `src/`.
   **Genera los tests desde las plantillas canónicas** de la referencia — mockea solo en la
   costura port / caso de uso; los fixtures de entidades vienen de builders en
   `tests/modules/<module>/builders/`.
-- **Regla de dependencias** (impuesta con `eslint-plugin-boundaries`) — un módulo nunca
-  importa las tripas de otro módulo; el código *de negocio* compartido va a
-  `modules/shared/`; `domain/` no depende de nada; `application/` → `domain/`;
-  `infrastructure/` y `presentation/` → `application/` + `domain/`. **Solo las pantallas
-  cruzan módulos:** una pantalla (su View + ViewModel bajo `presentation/screens/`) puede
-  ejecutar casos de uso de otro módulo e importar sus Props de entrada y los tipos de
-  dominio que devuelven, así un caso de uso vive una sola vez, en el módulo dueño del
-  recurso. Nada más cruza módulos (componentes, stores, mappers, modelos y nunca
-  `domain/` / `application/` / `infrastructure/`), y un módulo nunca duplica un port o
+- **Regla de dependencias** (impuesta con `eslint-plugin-boundaries`) — dentro de un
+  módulo, `domain/` no depende de nada; `application/` → `domain/`; `infrastructure/` →
+  `application/` + `domain/`. Un módulo **nunca importa otro módulo ni una pantalla**; el
+  código *de negocio* compartido va a `modules/shared/`. **Las pantallas orquestan:** una
+  pantalla importa `application/` y `domain/` de cualquier módulo (casos de uso, sus
+  Props, los tipos de dominio que devuelven), su propia carpeta, el store de su área,
+  `src/shared/` y `src/base/` — nunca la `infrastructure/` de un módulo (la resuelve el
+  contenedor de DI) ni otra pantalla (lo que comparten dos pantallas sube al área o a
+  `src/shared/`). Los layouts de `src/shared/layouts/` tienen los permisos de una
+  pantalla; el resto de `src/shared/` solo puede importar *tipos* de dominio de los
+  módulos. `src/base/config/di/` y `router/` son la raíz de composición. Un caso de uso
+  vive una sola vez, en el módulo dueño del recurso; un módulo nunca duplica un port o
   adapter que pertenece a otro.
 - **`src/base/`** — solo técnico transversal: `config/` (env, http, auth, logger, di,
   router), `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (clases base + `utils/` puras
@@ -230,23 +241,28 @@ Las reglas completas y las plantillas de código canónicas viven en
 6. **Crea `src/base/`** con `config/` y `lib/` como describen las referencias, e instala
    Pinia Colada en `main.ts` con las opciones de `src/base/config/colada/`.
 7. **Configura la imposición de límites** (ESLint) y los hooks de Husky + lint-staged.
-8. **Crea el primer módulo** (si el usuario indicó un dominio) siguiendo la estructura de
-   carpetas y las 4 capas.
+8. **Crea el primer módulo** (si el usuario indicó un dominio) con sus 3 capas, y su
+   primera pantalla en `src/screens/<area>/<screen-slug>/`; crea `src/shared/` para la
+   librería de UI, los layouts y el store de sesión.
 9. **Registra la DI** — liga ports con adapters en el contenedor de Awilix.
-10. **Registra las rutas** — agrega las rutas del módulo a `src/base/config/router/`.
+10. **Registra las rutas** — agrega las rutas del área a `src/base/config/router/`.
 
 ## Flujo — Agregar un módulo o feature
 
 1. **Confirma que el proyecto es una SPA de Vue** por el `package.json` / la estructura.
 2. **Lee `references/vue-conventions.md` y `references/frontend-spa-vue.md`.**
-3. **Crea la carpeta del módulo** dentro de `src/modules/<domain>/` con sus 4 capas.
+3. **Crea o reutiliza el módulo** en `src/modules/<domain>/` (3 capas) para la parte de
+   negocio; pon cada pantalla en `src/screens/<area>/<screen-slug>/`. Reutiliza desde la
+   pantalla el caso de uso de otro módulo en vez de duplicar su port.
 4. **Genera los archivos** siguiendo las convenciones de nombres (nombres de clase *y*
    sufijos de archivo).
-5. **Respeta la regla de dependencias** — `domain/` no importa nada de capas externas.
+5. **Respeta la regla de dependencias** — `domain/` no importa nada de capas externas; los
+   módulos nunca importan módulos ni pantallas; las pantallas nunca importan
+   infraestructura ni otras pantallas.
 6. **Aplica MVVM** — cada pantalla nueva tiene su ViewModel; la View queda pasiva; los datos
    del servidor pasan por Pinia Colada dentro del ViewModel.
 7. **Registra en la DI** — agrega el port/adapter y el caso de uso al contenedor de Awilix.
-8. **Agrega las rutas** al `*.routes.ts` del módulo y regístralas en el router.
+8. **Agrega las rutas** al `<area>.routes.ts` del área y registra el área en el router.
 9. **Genera los tests** en `tests/` replicando `src/`: `src/.../foo.ts` →
    `tests/.../foo.spec.ts`.
 

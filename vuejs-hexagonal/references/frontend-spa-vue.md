@@ -8,7 +8,7 @@ Framework-specific reference for the `vuejs-hexagonal` skill. Read it together w
 2. [Project Structure](#structure)
 3. [src/base Structure](#base)
 4. [HTTP Client](#http-client)
-5. [Presentation Layer](#presentation)
+5. [Screens](#presentation)
 6. [DI with Awilix](#di)
 7. [Props Convention](#props)
 8. [MVVM Convention](#mvvm)
@@ -130,7 +130,9 @@ Without these changes, tests in `tests/` will fail to resolve `@/` imports.
 
 Add the plugin and boundary rules to your ESLint flat config. This enforces the hexagonal dependency rule at lint time — violations fail the pre-commit hook.
 
-**Frontend layers (4):** `domain` → `application` → `infrastructure` / `presentation`. Infrastructure and presentation are siblings — neither can import from the other.
+**Two trees:** modules (`domain` → `application` → `infrastructure`, no presentation) and
+screens (`src/screens/<area>/<screen-slug>/`), plus `src/shared/` for transversal UI. Screens
+orchestrate the use cases of any module; modules never import modules or screens.
 
 ```typescript
 // eslint.config.ts
@@ -142,96 +144,74 @@ export default [
     plugins: { boundaries },
     settings: {
       'boundaries/elements': [
-        { type: 'domain',       pattern: ['src/modules/*/domain/**'],         capture: ['module'] },
-        { type: 'application',  pattern: ['src/modules/*/application/**'],    capture: ['module'] },
-        { type: 'infra',        pattern: ['src/modules/*/infrastructure/**'], capture: ['module'] },
-        // Screens first: an element matches its first pattern
-        { type: 'screen',       pattern: ['src/modules/*/presentation/screens/**'], capture: ['module'] },
-        { type: 'presentation', pattern: ['src/modules/*/presentation/**'],   capture: ['module'] },
-        // Cross-cutting
+        // Business modules (no presentation)
         { type: 'shared-domain', pattern: ['src/modules/shared/domain/**'] },
         { type: 'shared-app',    pattern: ['src/modules/shared/application/**'] },
         { type: 'shared-infra',  pattern: ['src/modules/shared/infrastructure/**'] },
-        { type: 'shared-pres',   pattern: ['src/modules/shared/presentation/**'] },
-        { type: 'base',          pattern: ['src/base/**'] },
+        { type: 'domain',      pattern: ['src/modules/*/domain/**'],         capture: ['module'] },
+        { type: 'application', pattern: ['src/modules/*/application/**'],    capture: ['module'] },
+        { type: 'infra',       pattern: ['src/modules/*/infrastructure/**'], capture: ['module'] },
+        // Screens: an element matches its first pattern, so the screen folder goes before its area
+        { type: 'screen', pattern: ['src/screens/*/*/**'], capture: ['area', 'screen'] },
+        { type: 'area',   pattern: ['src/screens/*/*'], mode: 'file', capture: ['area'] },
+        // Transversal UI
+        { type: 'layout', pattern: ['src/shared/layouts/**'] },
+        { type: 'shared', pattern: ['src/shared/**'] },
+        // Composition root before the rest of base
+        { type: 'composition', pattern: ['src/base/config/di/**', 'src/base/config/router/**'] },
+        { type: 'base', pattern: ['src/base/**'] },
       ],
-      'boundaries/ignore': ['**/*.spec.ts'],
+      'boundaries/ignore': ['**/*.spec.ts', '**/*.story.vue'],
     },
     rules: {
       'boundaries/element-types': [2, {
         default: 'disallow',
         rules: [
           // domain → only same-module domain, shared-domain, base
-          {
-            from: ['domain'],
-            allow: [
-              ['domain', { module: '${from.module}' }],
-              'shared-domain',
-              'base',
-            ],
-          },
+          { from: ['domain'], allow: [['domain', { module: '${from.module}' }], 'shared-domain', 'base'] },
           // application → domain + application (same module), shared-domain, shared-app, base
           {
             from: ['application'],
             allow: [
               ['domain', { module: '${from.module}' }],
               ['application', { module: '${from.module}' }],
-              'shared-domain',
-              'shared-app',
-              'base',
+              'shared-domain', 'shared-app', 'base',
             ],
           },
           // infrastructure → domain + application + infra (same module), shared-*, base
-          // ❌ Cannot import from presentation
           {
             from: ['infra'],
             allow: [
               ['domain', { module: '${from.module}' }],
               ['application', { module: '${from.module}' }],
               ['infra', { module: '${from.module}' }],
-              'shared-domain',
-              'shared-app',
-              'shared-infra',
-              'base',
+              'shared-domain', 'shared-app', 'shared-infra', 'base',
             ],
           },
-          // screen → its own module's presentation and screens, and the domain + application
-          // of ANY module (only screens may run another module's use cases), shared-*, base
-          // ❌ Cannot import from infrastructure, nor another module's presentation
+          // screen → domain + application of ANY module, its own folder, its area, shared UI, base
+          // ❌ never infrastructure (DI resolves it), never another screen
           {
             from: ['screen'],
             allow: [
-              'domain',
-              'application',
-              ['presentation', { module: '${from.module}' }],
-              ['screen', { module: '${from.module}' }],
-              'shared-domain',
-              'shared-app',
-              'shared-pres',
-              'base',
+              'domain', 'application', 'shared-domain', 'shared-app',
+              ['screen', { area: '${from.area}', screen: '${from.screen}' }],
+              ['area', { area: '${from.area}' }],
+              'layout', 'shared', 'base',
             ],
           },
-          // presentation (not screens) → domain + application + presentation (same module), shared-*, base
-          // ❌ Cannot import from infrastructure nor from another module
-          {
-            from: ['presentation'],
-            allow: [
-              ['domain', { module: '${from.module}' }],
-              ['application', { module: '${from.module}' }],
-              ['presentation', { module: '${from.module}' }],
-              ['screen', { module: '${from.module}' }],
-              'shared-domain',
-              'shared-app',
-              'shared-pres',
-              'base',
-            ],
-          },
-          // shared layers follow the same inward rule
+          // area (routes, store) → its screens, shared UI, base
+          { from: ['area'], allow: [['screen', { area: '${from.area}' }], ['area', { area: '${from.area}' }], 'shared', 'base'] },
+          // layout → like a screen (the private layout runs the logout use case)
+          { from: ['layout'], allow: ['domain', 'application', 'shared-domain', 'shared-app', 'layout', 'shared', 'base'] },
+          // shared components and stores → shared, base and module domain TYPES only
+          { from: ['shared'], allow: ['domain', 'shared-domain', 'shared', 'base'] },
+          // shared business layers follow the same inward rule
           { from: ['shared-domain'], allow: ['shared-domain', 'base'] },
           { from: ['shared-app'],    allow: ['shared-domain', 'shared-app', 'base'] },
           { from: ['shared-infra'],  allow: ['shared-domain', 'shared-app', 'shared-infra', 'base'] },
-          { from: ['shared-pres'],   allow: ['shared-domain', 'shared-app', 'shared-pres', 'base'] },
-          // base can import from base only
+          // composition root (DI container, router) wires everything
+          { from: ['composition'], allow: ['domain', 'application', 'infra', 'shared-domain', 'shared-app', 'shared-infra', 'area', 'screen', 'layout', 'shared', 'composition', 'base'] },
+          // base → base only
           { from: ['base'], allow: ['base'] },
         ],
       }],
@@ -242,14 +222,15 @@ export default [
 ```
 
 What this enforces:
-- ❌ `domain/` importing from `application/`, `infrastructure/`, `presentation/`, or another module
-- ❌ `application/` importing from `infrastructure/`, `presentation/`, or another module
-- ❌ `infrastructure/` importing from `presentation/` (and vice-versa)
-- ❌ Cross-module imports (e.g. `modules/user/` importing from `modules/order/`) — except
-  a screen importing another module's `domain/` or `application/` (its use cases, Props
-  and returned types)
-- ✅ All layers can import from `base/`
-- ✅ All layers can import from `shared/` (respecting shared's own layer hierarchy)
+- ❌ `domain/` importing from `application/`, `infrastructure/`, a screen, or another module
+- ❌ `application/` importing from `infrastructure/`, a screen, or another module
+- ❌ A module importing another module or anything in `src/screens/` or `src/shared/`
+- ❌ A screen importing a module's `infrastructure/` or another screen (share through the
+  area or `src/shared/`)
+- ❌ `src/shared/` components and stores running use cases (only layouts may)
+- ✅ A screen running use cases of any module (their `Props` and returned domain types)
+- ✅ Only `src/base/config/di/` and `router/` import infrastructure, area routes and layouts
+- ✅ Everything can import from `base/`
 
 ---
 
@@ -257,33 +238,34 @@ What this enforces:
 
 ```
 src/
-├── base/
-├── modules/
+├── base/                    ← technical cross-cutting (config, constants, lib)
+├── modules/                 ← business only: domain/ · application/ · infrastructure/
 │   ├── shared/
 │   │   ├── domain/
-│   │   │   ├── value-objects/
-│   │   │   └── exceptions/
-│   │   │       └── domain.exception.ts
+│   │   │   └── value-objects/
 │   │   ├── application/
-│   │   │   └── use-case.base.ts
-│   │   ├── infrastructure/
-│   │   │   └── http/
-│   │   │       └── interceptors/
-│   │   │           └── auth.interceptor.ts
-│   │   └── presentation/
-│   │       ├── components/
-│   │       ├── design-tokens/
-│   │       └── layouts/
-│   │           ├── public/
-│   │           │   └── PublicLayout.vue
-│   │           └── private/
-│   │               ├── PrivateLayout.vue
-│   │               └── usePrivateLayoutViewModel.ts
+│   │   └── infrastructure/
 │   └── user/
 │       ├── domain/          ← entities, value-objects, exceptions, props/, ports
 │       ├── application/     ← use-cases/
-│       ├── infrastructure/
-│       └── presentation/
+│       └── infrastructure/  ← repositories, dtos, mappers
+├── screens/                 ← UI: one folder per screen, grouped by area
+│   └── users/
+│       ├── users.routes.ts
+│       ├── users.store.ts   ← only if screens of the area share client state
+│       ├── user-profile/
+│       │   ├── UserProfileScreen.vue
+│       │   ├── useUserProfileViewModel.ts
+│       │   ├── user-profile-screen.mapper.ts
+│       │   ├── models/
+│       │   └── components/  ← components only this screen uses
+│       └── user-create/
+├── shared/                  ← transversal UI
+│   ├── components/ui/       ← the component library (atoms, molecules, organisms)
+│   ├── layouts/
+│   │   ├── public/PublicLayout.vue
+│   │   └── private/{PrivateLayout.vue, usePrivateLayoutViewModel.ts}
+│   └── stores/              ← session store
 ├── App.vue
 └── main.ts
 ```
@@ -310,7 +292,7 @@ src/base/
 │   ├── colada/
 │   │   └── colada.options.ts      ← Pinia Colada technical policy (staleTime, …)
 │   └── router/
-│       └── index.ts               ← createRouter, imports module routes
+│       └── index.ts               ← createRouter, composes the area routes
 ├── constants/
 │   └── index.ts                   ← project-wide constants (export const VARIABLE_NAME = value)
 └── lib/
@@ -362,22 +344,22 @@ import { RouterView } from 'vue-router'
 ```typescript
 // src/base/config/router/index.ts
 import { createRouter, createWebHistory } from 'vue-router'
-import { authRoutes } from '@/modules/auth/presentation/routes/auth.routes'
-import { userRoutes } from '@/modules/user/presentation/routes/user.routes'
+import { authRoutes } from '@/screens/auth/auth.routes'
+import { userRoutes } from '@/screens/users/users.routes'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/',
-      component: () => import('@/modules/shared/presentation/layouts/public/PublicLayout.vue'),
+      component: () => import('@/shared/layouts/public/PublicLayout.vue'),
       children: [
         ...authRoutes,
       ],
     },
     {
       path: '/',
-      component: () => import('@/modules/shared/presentation/layouts/private/PrivateLayout.vue'),
+      component: () => import('@/shared/layouts/private/PrivateLayout.vue'),
       children: [
         ...userRoutes,
       ],
@@ -631,34 +613,37 @@ export class HttpUserRepository implements UserRepository {
 
 ---
 
-## Presentation Layer {#presentation}
+## Screens {#presentation}
+
+Screens live **outside the modules**, in `src/screens/<area>/<screen-slug>/`. A module has no
+presentation; a screen runs the use cases of any module it needs (see the Dependency Rule
+in `vue-conventions.md`).
 
 ```
-modules/user/presentation/
-├── screens/
-│   ├── user-profile/
-│   │   ├── UserProfileScreen.vue
-│   │   └── useUserProfileViewModel.ts
-│   └── change-password/
-│       ├── ChangePasswordScreen.vue
-│       └── useChangePasswordViewModel.ts
-├── components/               ← components scoped to this module
+src/screens/users/                ← area (a menu section)
+├── users.routes.ts               ← the area's routes (RouteRecordRaw[])
+├── users.store.ts                ← cross-screen client state of the area (only if needed)
+├── components/                   ← components two screens of this area share (only if needed)
 │   └── UserCard.vue
-├── routes/
-│   └── user.routes.ts
-├── store/                    ← Pinia stores for this module
-│   └── user.store.ts
-├── composables/              ← reusable composables (not ViewModels)
-│   └── useUserPermissions.ts
-├── mappers/                  ← one mapper per screen, domain ↔ presentation models
-│   ├── user-profile-screen.mapper.ts
-│   ├── change-password-screen.mapper.ts
-│   └── create-user.form-mapper.ts
-└── models/                   ← presentation-specific interfaces (free name + Model suffix)
-    ├── user-summary.model.ts
-    ├── user-permissions.model.ts
-    └── create-user.form-model.ts
+├── user-profile/                 ← one folder per screen: everything only it uses
+│   ├── UserProfileScreen.vue     ← View
+│   ├── useUserProfileViewModel.ts← ViewModel
+│   ├── user-profile-screen.mapper.ts  ← domain → presentation models
+│   ├── models/                   ← presentation models (free name + Model suffix)
+│   │   ├── user-summary.model.ts
+│   │   └── user-permissions.model.ts
+│   └── components/               ← components only this screen uses
+└── user-create/
+    ├── UserCreateScreen.vue
+    ├── useUserCreateViewModel.ts
+    ├── user-create-screen.mapper.ts
+    ├── create-user.form-mapper.ts
+    └── models/
+        └── create-user.form-model.ts
 ```
+
+What two areas share goes to `src/shared/` (`components/`, `composables/`, `stores/`); the
+component library lives in `src/shared/components/ui/`.
 
 ---
 
@@ -763,11 +748,11 @@ export class UserCreator extends UseCase<CreateUserProps, User> {
 
 ## Form Model & Form Mapper {#form-mapper}
 
-When a screen has a form, define a **Form Model** (interface) and a **Form Mapper** (static class) in the presentation layer. The mapper converts the form data into domain `Props` before calling the use case.
+When a screen has a form, define a **Form Model** (interface) and a **Form Mapper** (static class) in the screen folder (`src/screens/<area>/<screen-slug>/`). The mapper converts the form data into domain `Props` before calling the use case.
 
 ### Form Model
 ```typescript
-// presentation/models/create-user.form-model.ts
+// src/screens/users/user-create/models/create-user.form-model.ts
 export interface CreateUserFormModel {
   name: string
   email: string
@@ -777,7 +762,7 @@ export interface CreateUserFormModel {
 
 ### Form Mapper
 ```typescript
-// presentation/mappers/create-user.form-mapper.ts
+// src/screens/users/user-create/create-user.form-mapper.ts
 import type { CreateUserFormModel } from '../models/create-user.form-model'
 import { CreateUserProps } from '../../domain/props/create-user.props'
 
@@ -810,20 +795,20 @@ This avoids ambiguity when one mapper handles multiple types in both directions.
 
 ### Example
 ```typescript
-// presentation/models/user-summary.model.ts
+// src/screens/users/user-profile/models/user-summary.model.ts
 export interface UserSummaryModel {
   fullName: string
   initials: string
   joinedLabel: string
 }
 
-// presentation/models/user-permissions.model.ts
+// src/screens/users/user-profile/models/user-permissions.model.ts
 export interface UserPermissionsModel {
   canEdit: boolean
   canDelete: boolean
 }
 
-// presentation/mappers/user-profile-screen.mapper.ts
+// src/screens/users/user-profile/user-profile-screen.mapper.ts
 import type { User } from '@/modules/user/domain/user.entity'
 import type { UserSummaryModel } from '../models/user-summary.model'
 import type { UserPermissionsModel } from '../models/user-permissions.model'
@@ -857,7 +842,7 @@ export class UserProfileScreenMapper {
 ## MVVM Convention {#mvvm}
 
 The presentation layer follows **MVVM**:
-- **Model** — the Presentation Models / Form Models built by the screen's mappers, the Pinia Colada cache for server state (domain data fetched through use cases), and the module store for cross-screen client state.
+- **Model** — the Presentation Models / Form Models built by the screen's mappers, the Pinia Colada cache for server state (domain data fetched through use cases), and the area store (`<area>.store.ts`) or a `src/shared/stores/` store for cross-screen client state.
 - **View** — the Screen component (`.vue` SFC). Passive: it renders state and forwards user intent to the ViewModel.
 - **ViewModel** — the `use<Screen>ViewModel` composable. Owns UI state and orchestration; it is the **driving boundary** of the frontend hexagon (the SPA analog of a backend controller).
 
@@ -874,7 +859,7 @@ The presentation layer follows **MVVM**:
 - **Unwrap point for `Result`**: use cases return `Result<T>` and never throw (adapters already converted every failure). Inside the `query` / `mutation` function the ViewModel unwraps with `if (result.isErr()) throw result.getError()` — **the only `throw` in the whole SPA** — and the query engine captures it and exposes it as `error`. The ViewModel then maps that `DomainException`'s `code` to a user-facing message. Outside those functions it never throws, and `try/catch` is NOT its error channel.
 - Converts domain data to Presentation Models via the Screen Mapper, with `computed` over the query's `data` — the cache keeps domain data, never Presentation Models.
 - Returns **only**: reactive refs / computeds with Presentation Models, primitive UI state (`isLoading`, `error` as `string | null`), and action functions. Never domain entities, `Result`s, exceptions, query/mutation objects, or the container.
-- The module store (Pinia) holds **cross-screen client state** only (e.g. the logged-in session, a remembered filter); server data lives in the Pinia Colada cache, never copied into a store. ViewModels read/write the store, Views never import it.
+- The area or shared store (Pinia) holds **cross-screen client state** only (e.g. the logged-in session, a remembered filter); server data lives in the Pinia Colada cache, never copied into a store. ViewModels read/write the store, Views never import it.
 
 ### View (Screen) rules
 
@@ -1121,14 +1106,14 @@ export function withSetup<T>(composable: () => T): { result: T; app: App } {
 ```
 
 ```typescript
-// tests/modules/user/presentation/screens/user-profile/useUserProfileViewModel.spec.ts
+// tests/screens/users/user-profile/useUserProfileViewModel.spec.ts
 import { flushPromises } from '@vue/test-utils'
 import { asValue } from 'awilix'
 import { container } from '@/base/config/di/container'
 import { Result } from '@/base/lib/domain/result'
 import type { UserFinder } from '@/modules/user/application/use-cases/user-finder/user-finder.use-case'
 import { UserNotFoundException } from '@/modules/user/domain/exceptions/user-not-found.exception'
-import { useUserProfileViewModel } from '@/modules/user/presentation/screens/user-profile/useUserProfileViewModel'
+import { useUserProfileViewModel } from '@/screens/users/user-profile/useUserProfileViewModel'
 import { buildUser } from '../../../builders/user.builder'
 import { withSetup } from '../../../../../helpers/with-setup'
 
@@ -1166,43 +1151,43 @@ it('maps the DomainException code to a UI message on failure', async () => {
 
 ## Router Convention {#router}
 
-Each module exports its own routes as an **array** (`RouteRecordRaw[]`) — the router
+Each area exports its own routes as an **array** (`RouteRecordRaw[]`) — the router
 composes them with a spread (`...userRoutes`), so a single object would blow up at
 runtime with `userRoutes is not iterable`:
 
 ```typescript
-// modules/user/presentation/routes/user.routes.ts
+// src/screens/users/users.routes.ts
 import type { RouteRecordRaw } from 'vue-router'
 
 export const userRoutes: RouteRecordRaw[] = [
   {
     path: '/users/profile',
     name: 'user-profile',
-    component: () => import('../screens/user-profile/UserProfileScreen.vue'),
+    component: () => import('./user-profile/UserProfileScreen.vue'),
   },
   {
     path: '/users/:id',
     name: 'user-detail',
-    component: () => import('../screens/user-detail/UserDetailScreen.vue'),
+    component: () => import('./user-detail/UserDetailScreen.vue'),
   },
 ]
 ```
 
-A module that really needs nested routes still exports an array — with one parent record
+An area that really needs nested routes still exports an array — with one parent record
 carrying its `children`.
 
 ---
 
 ## Layouts Convention {#layouts}
 
-Layouts live in `modules/shared/presentation/layouts/` and wrap screens based on authentication state.
+Layouts live in `src/shared/layouts/` and wrap screens based on authentication state.
 
 - **PublicLayout** — renders public screens (login, register, etc.). No auth check.
 - **PrivateLayout** — renders private screens. Uses `usePrivateLayoutViewModel` to validate the user is authenticated before rendering. If not authenticated, redirects to login.
 
 ### PublicLayout
 ```vue
-<!-- modules/shared/presentation/layouts/public/PublicLayout.vue -->
+<!-- src/shared/layouts/public/PublicLayout.vue -->
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 </script>
@@ -1216,7 +1201,7 @@ import { RouterView } from 'vue-router'
 
 ### PrivateLayout + ViewModel
 ```typescript
-// modules/shared/presentation/layouts/private/usePrivateLayoutViewModel.ts
+// src/shared/layouts/private/usePrivateLayoutViewModel.ts
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { container } from '@/base/config/di/container'
@@ -1248,7 +1233,7 @@ export function usePrivateLayoutViewModel() {
 ```
 
 ```vue
-<!-- modules/shared/presentation/layouts/private/PrivateLayout.vue -->
+<!-- src/shared/layouts/private/PrivateLayout.vue -->
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import { usePrivateLayoutViewModel } from './usePrivateLayoutViewModel'
@@ -1266,7 +1251,7 @@ const { isAuthenticated, isLoading } = usePrivateLayoutViewModel()
 
 ---
 
-## Module Example — Full User Module {#module-example}
+## Module Example — Full User Module and Its Screens {#module-example}
 
 ### Source (`src/modules/user/`)
 ```
@@ -1291,25 +1276,25 @@ modules/user/
 │   │   └── http-user.repository.ts
 │   └── dtos/
 │       └── user-response.dto.ts
-└── presentation/
-    ├── screens/
-    │   └── user-profile/
-    │       ├── UserProfileScreen.vue
-    │       └── useUserProfileViewModel.ts
-    ├── components/
-    │   └── UserCard.vue
-    ├── routes/
-    │   └── user.routes.ts
-    ├── store/
-    │   └── user.store.ts
-    ├── composables/
-    │   └── useUserPermissions.ts
-    ├── mappers/
-    │   ├── user-profile-screen.mapper.ts
-    │   └── create-user.form-mapper.ts
+```
+
+### Screens (`src/screens/users/`)
+```
+screens/users/
+├── users.routes.ts
+├── users.store.ts
+├── user-profile/
+│   ├── UserProfileScreen.vue
+│   ├── useUserProfileViewModel.ts
+│   ├── user-profile-screen.mapper.ts
+│   └── models/
+│       ├── user-summary.model.ts
+│       └── user-permissions.model.ts
+└── user-create/
+    ├── UserCreateScreen.vue
+    ├── useUserCreateViewModel.ts
+    ├── create-user.form-mapper.ts
     └── models/
-        ├── user-summary.model.ts
-        ├── user-permissions.model.ts
         └── create-user.form-model.ts
 ```
 
@@ -1323,4 +1308,11 @@ tests/modules/user/
 └── infrastructure/
     └── repositories/
         └── http-user.repository.spec.ts
+
+tests/screens/users/
+├── user-profile/
+│   ├── useUserProfileViewModel.spec.ts
+│   └── user-profile-screen.mapper.spec.ts
+└── user-create/
+    └── create-user.form-mapper.spec.ts
 ```
