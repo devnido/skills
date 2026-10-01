@@ -185,8 +185,16 @@ Las reglas completas y las plantillas de código canónicas viven en
   `infrastructure/` y `presentation/` → `application/` + `domain/`.
 - **`src/base/`** — solo técnico transversal: `config/` (env, http, auth, logger, di,
   router), `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (clases base + `utils/` puras
-  agrupadas por concern). El patrón Criteria vive en `base/lib/**/criteria/` (ver la skill
-  `criteria-pattern`).
+  agrupadas por concern), más `lib/infrastructure/criteria/` para el lenguaje de consulta del
+  backend.
+- **Listados con filtros — el Criteria de la API es infraestructura** — el query string
+  genérico de filtros/orden/paginación del backend es el lenguaje de consulta de la API remota,
+  no dominio del SPA. El caso de uso recibe un `Find<Entities>Props` con solo los filtros que
+  ofrece la UI (valores de negocio, opcional = sin filtro, sin valores de UI como `'all'`), el
+  port es `find(props)` y el caso de uso lo pasa directo; un `<Entity>QueryMapper` por módulo
+  convierte el Props en un `ApiCriteria` compartido, serializado por `ApiCriteriaSerializer`
+  (`base/lib/infrastructure/criteria/`). Nunca `matching(criteria)` ni value objects de
+  Criteria en `domain/`.
 - **Variables de entorno** — el agente crea `.env.example` (versionado); el **prefijo
   `VITE_` es obligatorio** (solo `VITE_*` llega a `import.meta.env`); solo
   `src/base/config/env/` lee `import.meta.env`. Nunca pongas un secreto en una variable
@@ -251,8 +259,10 @@ No omitas los pasos 6-9 salvo que el usuario lo pida explícitamente.
 - `hexagonal-architecture` — la misma arquitectura para NestJS, React SPA, React Native y
   Next.js. **No** cubre Vue: esta skill es la única fuente para SPAs de Vue. Úsala cuando la
   tarea **no** sea una SPA de Vue.
-- `criteria-pattern` — filtros dinámicos + orden + paginación detrás de un único método
-  `matching(criteria)` en el repositorio.
+- `criteria-pattern` — el Criteria de dominio de un backend (cualquier consulta detrás de un
+  único `matching(criteria)`). En una SPA de Vue el Criteria de la API es infraestructura (ver
+  el resumen y `vue-conventions.md`); usa esa skill solo si una pantalla ofrece un constructor
+  de consultas libre.
 
 ---
 

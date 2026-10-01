@@ -23,10 +23,11 @@ or methods.
 12. [Code Quality](#code-quality)
 13. [Dependency Rule](#dependency-rule-enforced-via-eslint-plugin-boundaries)
 14. [src/base Structure](#srcbase-structure)
-15. [Environment Variables Convention](#environment-variables-convention)
-16. [Constants Convention](#constants-convention)
-17. [Utils Convention](#utils-convention)
-18. [Quick Reference: Use Case File Structure](#quick-reference-use-case-file-structure)
+15. [Filtered Lists: the API Criteria is Infrastructure](#filtered-lists-the-api-criteria-is-infrastructure)
+16. [Environment Variables Convention](#environment-variables-convention)
+17. [Constants Convention](#constants-convention)
+18. [Utils Convention](#utils-convention)
+19. [Quick Reference: Use Case File Structure](#quick-reference-use-case-file-structure)
 
 ---
 
@@ -688,16 +689,138 @@ src/base/
 ├── constants/
 │   └── index.ts     ← project-wide constants (export const VARIABLE_NAME = value)
 └── lib/             ← abstract base classes & generic technical machinery
-    ├── domain/         ← result.ts, command.base.ts, query.base.ts, props.base.ts, domain-exception.base.ts, value-object.base.ts, paginated.ts, criteria/ (Criteria pattern VOs, when used)
+    ├── domain/         ← result.ts, command.base.ts, query.base.ts, props.base.ts, domain-exception.base.ts, value-object.base.ts, paginated.ts
     ├── application/    ← use-case.base.ts
+    ├── infrastructure/
+    │   └── criteria/   ← api-criteria.ts, api-criteria.serializer.ts (the backend's query language, when used)
     └── utils/          ← pure utility functions grouped by concern
 ```
 
-> **Criteria pattern placement.** Dynamic filter + order + pagination is *technical
-> machinery*, not business: its domain value objects live in `src/base/lib/domain/criteria/`
-> and the query-string converter in `src/base/lib/infrastructure/criteria/` — never in a module
-> or in `modules/shared/`. Repositories then expose a single `matching(criteria)` method
-> instead of many `findByX`. For the full pattern, see the `criteria-pattern` skill.
+## Filtered Lists: the API Criteria is Infrastructure
+
+A backend list endpoint usually accepts a generic **Criteria** in its query string
+(filters + order + pagination, e.g. `filters[0][field]=status&filters[0][operator]==&filters[0][value]=pending&orderBy=createdAt&orderType=DESC&page=1&limit=10`).
+In the **backend** the Criteria is domain: its repository is the boundary with the
+database and must answer **any** query. In the **SPA** that same format is only the
+**query language of a remote API** — a contract with an external system, like the shape
+of a DTO — and the screen offers a fixed, small set of filters bounded by its UI. So in
+the SPA the Criteria is **infrastructure**:
+
+- **Domain / application never see the Criteria.** The use case receives a
+  `Find<Entities>Props` with **only the filters the UI offers**, using **business values**:
+  an optional field means "do not filter by it"; there are no UI values such as `'all'`
+  (the Form Mapper converts them to `undefined`). The port reuses those Props
+  (`find(props)`, Port Parameters case 1) and the use case passes them through. There is
+  **no** `matching(criteria)` and **no** Criteria value objects in `base/lib/domain/`.
+- **The SPA still owns a Criteria to know how to convert.** Plain infrastructure types plus
+  a serializer live in `src/base/lib/infrastructure/criteria/`, shared by every list.
+- **One query mapper per module** (`infrastructure/mappers/<entity>-query.mapper.ts`) is
+  the only place that knows the backend's field names, operators and sort fields. Its
+  translation (Props → `ApiCriteria`) is unit-tested one case per filter and sort.
+
+```typescript
+// src/base/lib/infrastructure/criteria/api-criteria.ts
+export type ApiFilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'NOT_CONTAINS'
+
+export interface ApiFilter {
+  field: string
+  operator: ApiFilterOperator
+  value: string
+}
+
+export type ApiOrderType = 'ASC' | 'DESC'
+
+export interface ApiCriteria {
+  filters: ApiFilter[]
+  orderBy?: string
+  orderType?: ApiOrderType
+  page: number
+  limit: number
+}
+
+// src/base/lib/infrastructure/criteria/api-criteria.serializer.ts
+import type { ApiCriteria } from './api-criteria'
+
+export class ApiCriteriaSerializer {
+  // URLSearchParams always encodes the values: never interpolate them into the url.
+  static toQueryString(criteria: ApiCriteria): string {
+    const params = new URLSearchParams()
+    criteria.filters.forEach((filter, index) => {
+      params.set(`filters[${index}][field]`, filter.field)
+      params.set(`filters[${index}][operator]`, filter.operator)
+      params.set(`filters[${index}][value]`, filter.value)
+    })
+    if (criteria.orderBy) {
+      params.set('orderBy', criteria.orderBy)
+      if (criteria.orderType) params.set('orderType', criteria.orderType)
+    }
+    params.set('page', String(criteria.page))
+    params.set('limit', String(criteria.limit))
+    return params.toString()
+  }
+}
+```
+
+```typescript
+// modules/spot/domain/props/find-spots.props.ts — only what the UI offers, business values
+export type SpotSort = 'recent' | 'name'
+
+export class FindSpotsProps extends Props {
+  constructor(
+    public readonly page: number,
+    public readonly sort: SpotSort,
+    public readonly search?: string,
+    public readonly status?: SpotStatus,
+    public readonly published?: boolean,
+  ) {
+    super()
+  }
+}
+
+// modules/spot/domain/ports/spot.repository.ts
+export interface SpotRepository {
+  find(props: FindSpotsProps): Promise<Result<Paginated<SpotListItem>>>
+}
+
+// modules/spot/infrastructure/mappers/spot-query.mapper.ts — the only code that knows the backend fields
+const PAGE_SIZE = 10
+const SORTS: Record<SpotSort, { orderBy: string; orderType: ApiOrderType }> = {
+  recent: { orderBy: 'createdAt', orderType: 'DESC' },
+  name: { orderBy: 'name', orderType: 'ASC' },
+}
+
+export class SpotQueryMapper {
+  static findSpotsPropsToApiCriteria(props: FindSpotsProps): ApiCriteria {
+    const filters: ApiFilter[] = []
+    const search = props.search?.trim()
+    if (search) filters.push({ field: 'name', operator: 'CONTAINS', value: search })
+    if (props.status) filters.push({ field: 'status', operator: '=', value: props.status })
+    if (props.published !== undefined) {
+      filters.push({ field: 'published', operator: '=', value: String(props.published) })
+    }
+    return { filters, ...SORTS[props.sort], page: props.page, limit: PAGE_SIZE }
+  }
+}
+
+// modules/spot/infrastructure/repositories/http-spot.repository.ts
+async find(props: FindSpotsProps): Promise<Result<Paginated<SpotListItem>>> {
+  try {
+    const query = ApiCriteriaSerializer.toQueryString(SpotQueryMapper.findSpotsPropsToApiCriteria(props))
+    const response = await this.httpClient.get<SpotsResponseDto>(`/spots?${query}`)
+    return Result.ok(SpotMapper.spotsResponseDtoToPaginatedDomain(response.data))
+  } catch (error) {
+    return Result.err(this.toDomainError(error))
+  }
+}
+```
+
+Rules:
+- A new list adds a Props + a query mapper in its module; `ApiCriteria` and the serializer
+  are reused as they are.
+- UI-only values (`'all'`, `'hidden'`) stop at the Form Mapper; the Props hold business
+  values (`status?: SpotStatus`, `published?: boolean`).
+- Only if a screen ever offers a **free query builder** (any field, any operator) does the
+  Criteria become a domain concept of the SPA; then apply the `criteria-pattern` skill.
 
 ## Environment Variables Convention
 

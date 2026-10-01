@@ -194,8 +194,14 @@ Summary of the non-negotiables:
   `application/` + `domain/`.
 - **`src/base/`** — technical cross-cutting only: `config/` (env, http, auth, logger, di,
   router), `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (base classes + pure `utils/`
-  grouped by concern). The Criteria pattern lives in `base/lib/**/criteria/` (see the
-  `criteria-pattern` skill).
+  grouped by concern), plus `lib/infrastructure/criteria/` for the backend's query language.
+- **Filtered lists — the API Criteria is infrastructure** — the backend's generic
+  filter/order/pagination query string is the remote API's query language, not SPA domain.
+  The use case gets a `Find<Entities>Props` with only the filters the UI offers (business
+  values, optional = no filter, no UI values like `'all'`), the port is `find(props)` and the
+  use case passes it through; a per-module `<Entity>QueryMapper` turns the Props into a shared
+  `ApiCriteria`, serialized by `ApiCriteriaSerializer` (`base/lib/infrastructure/criteria/`).
+  Never `matching(criteria)` nor Criteria value objects in `domain/`.
 - **Env vars** — the agent creates `.env.example` (committed); the **`VITE_` prefix is
   mandatory** (only `VITE_*` reaches `import.meta.env`); only `src/base/config/env/` reads
   `import.meta.env`. Never put a secret in a `VITE_` variable — everything ships to the browser.
@@ -258,8 +264,9 @@ Do not skip steps 6-9 unless the user explicitly says so.
 - `hexagonal-architecture` — the same architecture for NestJS, React SPA, React Native
   and Next.js. It does **not** cover Vue: this skill is the only source for Vue SPAs. Use
   it when the task is **not** a Vue SPA.
-- `criteria-pattern` — dynamic filters + order + pagination behind a single
-  `matching(criteria)` repository method.
+- `criteria-pattern` — the domain Criteria of a backend (any query behind one
+  `matching(criteria)`). In a Vue SPA the API Criteria is infrastructure (see the digest and
+  `vue-conventions.md`); use that skill only if a screen offers a free query builder.
 
 ---
 
