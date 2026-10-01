@@ -191,7 +191,12 @@ Summary of the non-negotiables:
 - **Dependency rule** (enforced with `eslint-plugin-boundaries`) — a module never imports
   another module's internals; shared *business* code goes to `modules/shared/`; `domain/`
   depends on nothing; `application/` → `domain/`; `infrastructure/` and `presentation/` →
-  `application/` + `domain/`.
+  `application/` + `domain/`. **Only screens cross modules:** a screen (its View +
+  ViewModel under `presentation/screens/`) may run another module's use cases and import
+  their input Props and returned domain types, so a use case lives once, in the module
+  that owns the resource. Nothing else crosses modules (components, stores, mappers,
+  models, and never `domain/` / `application/` / `infrastructure/`), and a module never
+  duplicates a port or adapter another module owns.
 - **`src/base/`** — technical cross-cutting only: `config/` (env, http, auth, logger, di,
   router), `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (base classes + pure `utils/`
   grouped by concern), plus `lib/infrastructure/criteria/` for the backend's query language.

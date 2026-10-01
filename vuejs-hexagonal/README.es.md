@@ -182,7 +182,13 @@ Las reglas completas y las plantillas de código canónicas viven en
 - **Regla de dependencias** (impuesta con `eslint-plugin-boundaries`) — un módulo nunca
   importa las tripas de otro módulo; el código *de negocio* compartido va a
   `modules/shared/`; `domain/` no depende de nada; `application/` → `domain/`;
-  `infrastructure/` y `presentation/` → `application/` + `domain/`.
+  `infrastructure/` y `presentation/` → `application/` + `domain/`. **Solo las pantallas
+  cruzan módulos:** una pantalla (su View + ViewModel bajo `presentation/screens/`) puede
+  ejecutar casos de uso de otro módulo e importar sus Props de entrada y los tipos de
+  dominio que devuelven, así un caso de uso vive una sola vez, en el módulo dueño del
+  recurso. Nada más cruza módulos (componentes, stores, mappers, modelos y nunca
+  `domain/` / `application/` / `infrastructure/`), y un módulo nunca duplica un port o
+  adapter que pertenece a otro.
 - **`src/base/`** — solo técnico transversal: `config/` (env, http, auth, logger, di,
   router), `constants/index.ts` (UPPER_SNAKE_CASE), `lib/` (clases base + `utils/` puras
   agrupadas por concern), más `lib/infrastructure/criteria/` para el lenguaje de consulta del

@@ -145,6 +145,8 @@ export default [
         { type: 'domain',       pattern: ['src/modules/*/domain/**'],         capture: ['module'] },
         { type: 'application',  pattern: ['src/modules/*/application/**'],    capture: ['module'] },
         { type: 'infra',        pattern: ['src/modules/*/infrastructure/**'], capture: ['module'] },
+        // Screens first: an element matches its first pattern
+        { type: 'screen',       pattern: ['src/modules/*/presentation/screens/**'], capture: ['module'] },
         { type: 'presentation', pattern: ['src/modules/*/presentation/**'],   capture: ['module'] },
         // Cross-cutting
         { type: 'shared-domain', pattern: ['src/modules/shared/domain/**'] },
@@ -193,14 +195,31 @@ export default [
               'base',
             ],
           },
-          // presentation → domain + application + presentation (same module), shared-*, base
-          // ❌ Cannot import from infrastructure
+          // screen → its own module's presentation and screens, and the domain + application
+          // of ANY module (only screens may run another module's use cases), shared-*, base
+          // ❌ Cannot import from infrastructure, nor another module's presentation
+          {
+            from: ['screen'],
+            allow: [
+              'domain',
+              'application',
+              ['presentation', { module: '${from.module}' }],
+              ['screen', { module: '${from.module}' }],
+              'shared-domain',
+              'shared-app',
+              'shared-pres',
+              'base',
+            ],
+          },
+          // presentation (not screens) → domain + application + presentation (same module), shared-*, base
+          // ❌ Cannot import from infrastructure nor from another module
           {
             from: ['presentation'],
             allow: [
               ['domain', { module: '${from.module}' }],
               ['application', { module: '${from.module}' }],
               ['presentation', { module: '${from.module}' }],
+              ['screen', { module: '${from.module}' }],
               'shared-domain',
               'shared-app',
               'shared-pres',
@@ -226,7 +245,9 @@ What this enforces:
 - ❌ `domain/` importing from `application/`, `infrastructure/`, `presentation/`, or another module
 - ❌ `application/` importing from `infrastructure/`, `presentation/`, or another module
 - ❌ `infrastructure/` importing from `presentation/` (and vice-versa)
-- ❌ Cross-module imports (e.g. `modules/user/` importing from `modules/order/`)
+- ❌ Cross-module imports (e.g. `modules/user/` importing from `modules/order/`) — except
+  a screen importing another module's `domain/` or `application/` (its use cases, Props
+  and returned types)
 - ✅ All layers can import from `base/`
 - ✅ All layers can import from `shared/` (respecting shared's own layer hierarchy)
 

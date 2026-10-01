@@ -668,8 +668,16 @@ The project uses `husky` + `lint-staged` for pre-commit hooks that run linting a
 
 ## Dependency Rule (enforced via `eslint-plugin-boundaries`)
 
-- Modules **never** import from other modules
-- If something is needed in more than one module → move it to `modules/shared/`
+- Modules **never** import from other modules — **except screens**: a screen
+  (`presentation/screens/<screen>/`, its View and ViewModel) may run another module's use
+  cases and import their input `Props` and returned domain types (entities, value
+  objects). The use case lives once, in the module that owns the resource, and every
+  screen that needs it reuses it; nothing is duplicated.
+- Nothing else crosses modules: not components, stores, mappers or models of the
+  presentation layer, and never `domain/`, `application/` or `infrastructure/`. A module
+  never duplicates a port or adapter that another module owns.
+- If a *business concept* (not a use case) is needed in more than one module → move it to
+  `modules/shared/`
 - `domain/` has zero external dependencies
 - `application/` depends only on `domain/`
 - `infrastructure/` depends on `application/` and `domain/`
